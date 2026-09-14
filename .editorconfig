@@ -1,0 +1,10 @@
+root = true
+
+[*.cs]
+# Dead-code surfacing (shows in the IDE; add <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+# to a .csproj/Directory.Build.props if you also want these during `dotnet build`).
+dotnet_diagnostic.IDE0051.severity = warning   # unused private member (method/field/property/nested type)
+dotnet_diagnostic.IDE0052.severity = warning   # private member assigned but never read
+# Compiler dead-field warnings (emitted by default; listed here for visibility).
+dotnet_diagnostic.CS0169.severity = warning    # private field is never used
+dotnet_diagnostic.CS0414.severity = warning    # private field assigned but its value is never used

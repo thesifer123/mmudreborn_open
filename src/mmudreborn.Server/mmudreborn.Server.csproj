@@ -1,0 +1,32 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Dapper" Version="2.1.72" />
+    <PackageReference Include="Npgsql" Version="8.0.6" />
+    <PackageReference Include="System.Text.Encoding.CodePages" Version="10.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../../CWGamingServ/CWGaming.Shared/CWGaming.Shared.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Operator-supplied art assets the `map` command and town-square signs read at runtime
+         (area maps, sign text, …). Copied next to the binary so the runtime resolver finds
+         {BaseDirectory}/Data/assets/<file> directly rather than walking up to the source tree
+         (which breaks for a published build). Absent by default — see Data/assets/README.md. -->
+    <None Include="Data/assets/**" CopyToOutputDirectory="PreserveNewest" />
+    <!-- ALSO embed any *.ANS area maps in the assembly so the `map` command still renders even if a
+         deploy fails to copy Data/assets next to the binary (LoadMapAnsi falls back to the embedded copy —
+         see CommandParser.RoomDisplay). The disk copies above remain the primary source. -->
+    <EmbeddedResource Include="Data/assets/*.ANS" />
+  </ItemGroup>
+
+</Project>

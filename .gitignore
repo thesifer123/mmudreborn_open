@@ -1,0 +1,22 @@
+bin/
+obj/
+*.user
+*.suo
+.vs/
+.idea/
+*.swp
+*.lscache
+__pycache__/
+*.pyc
+.venv/
+
+# Game content is operator-supplied and never committed.
+*.dat
+*.DAT
+game_data.sql
+help_topics.json
+src/mmudreborn.Server/Data/assets/*
+!src/mmudreborn.Server/Data/assets/README.md
+
+# Local database backups
+/backups/
