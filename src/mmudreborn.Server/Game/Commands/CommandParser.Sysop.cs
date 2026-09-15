@@ -3366,7 +3366,7 @@ public partial class CommandParser
         (QolFeature.SetLook, "set look", "setlook"),
         (QolFeature.Home, "home", "home"),
         (QolFeature.WhoWeb, "web-who", "webwho"),
-        (QolFeature.BulkQuantity, "<n> on get/drop/give/buy/sell", "qty"),
+        (QolFeature.BulkQuantity, "<n> on get/drop/give/buy/sell/hide", "qty"),
         (QolFeature.SpellRemoves, "spells: remove + apply", "spells"),
     };
 

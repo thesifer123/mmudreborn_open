@@ -16,7 +16,7 @@ public enum QolFeature
     SetLook,    // "set look modern|traditional" room-description rendering toggle
     Home,       // the "home <monster>" unique-boss spawn-origin / respawn-timer lookup
     WhoWeb,     // the "web-who" list of characters present on the web (telepath-eligible), mirroring WHO
-    BulkQuantity, // a leading count on GET/DROP/GIVE/BUY/SELL of an ITEM ("get 10 torch") — stock counts only coins
+    BulkQuantity, // a leading count on GET/DROP/GIVE/BUY/SELL/HIDE of an ITEM ("get 10 torch") — stock counts only coins
     SpellRemoves, // a cast that strips a spell on its remove list still applies its own buff (stock: that cast ends at the removal)
 }
 

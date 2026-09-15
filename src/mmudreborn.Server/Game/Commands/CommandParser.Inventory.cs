@@ -2028,86 +2028,108 @@ public partial class CommandParser
             return;
         }
 
-        if (!TryResolveUniqueCarriedItem(target, includeEquipped: true, out var carriedItem, out var ambiguousNames))
+        // QOL bulk count: "hide 10 torch". Parsed after the currency branch, so stock's own counted coin
+        // form ("hide 5 gold") keeps it — only an item name behind the number gets here.
+        int bulkQuantity = 1;
+        string itemTarget = target;
+        if (TryParseBulkQuantity(target, out int parsedBulk, out string bulkName))
         {
-            if (ambiguousNames != null)
+            bulkQuantity = parsedBulk;
+            itemTarget = bulkName;
+        }
+
+        // The room's static (room-record) hidden items hold hidden slots too, but they are never
+        // materialized into the runtime ground pile — so they are passed in as reserved slots.
+        var room = _world.GetRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber);
+        int staticHidden = room?.GetHiddenItemIds()?.Count ?? 0;
+
+        int hiddenCount = 0;
+        string hiddenName = string.Empty;
+        string? hideStopMessage = null;
+        for (int pass = 0; pass < bulkQuantity; pass++)
+        {
+            // Re-resolved every pass: each hide removes an entry and renumbers the inventory beneath it.
+            if (!TryResolveUniqueCarriedItem(itemTarget, includeEquipped: true, out var carriedItem, out var ambiguousNames))
             {
-                await ShowItemDisambiguationAsync(ambiguousNames);
+                if (ambiguousNames != null)
+                {
+                    await ShowItemDisambiguationAsync(ambiguousNames);
+                    return;
+                }
+
+                // Hiding the last copy mid-run needs no words — the summary carries the count.
+                if (hiddenCount > 0)
+                    break;
+
+                // A single-arg `hide <x>` whose <x> is not a carried item hits the
+                // not-found branch and returns silently — there is NO "You don't have %s to hide!" item
+                // string (only the currency form "You don't have %s %s to hide!"). So an unmatched item falls
+                // through to room text/exit matching, then "Your command had no effect." — like drop/bash.
+                if (await TryHandleRoomAction($"hide {target}"))
+                    return;
+                await _client.SendLineAsync("Your command had no effect.");
                 return;
             }
 
-            // A single-arg `hide <x>` whose <x> is not a carried item hits the
-            // not-found branch and returns silently — there is NO "You don't have %s to hide!" item
-            // string (only the currency form "You don't have %s %s to hide!"). So an unmatched item falls
-            // through to room text/exit matching, then "Your command had no effect." — like drop/bash.
-            if (await TryHandleRoomAction($"hide {target}"))
-                return;
-            await _client.SendLineAsync("Your command had no effect.");
-            return;
-        }
+            // The SAME no-drop gate as DROP, checked BEFORE any removal (abort
+            // leaves the item carried) — just with the "hide" wording. Without this, a
+            // NotDroppable Loyal item (e.g. the Hellblade) that `drop` correctly refuses could still be ditched
+            // via `stash`/`hide <item>`. Mirrors HandleDrop's two gates.
+            //   1) A NotDroppable item can never be hidden.
+            //   2) Cursed (82) / Major-Curse (83) items can't be hidden while still worn, unless a spare copy
+            //      of the same item sits in the pack.
+            // Both are real refusals rather than a run-out, so they print however far into a bulk run we are.
+            var hideCandidate = carriedItem.Item;
+            if (hideCandidate.NotDroppable)
+            {
+                hideStopMessage = "You may not hide that item!";
+                break;
+            }
 
-        // The SAME no-drop gate as DROP, checked BEFORE any removal (abort
-        // leaves the item carried) — just with the "hide" wording. Without this, a
-        // NotDroppable Loyal item (e.g. the Hellblade) that `drop` correctly refuses could still be ditched
-        // via `stash`/`hide <item>`. Mirrors HandleDrop's two gates.
-        //   1) A NotDroppable item can never be hidden.
-        //   2) Cursed (82) / Major-Curse (83) items can't be hidden while still worn, unless a spare copy
-        //      of the same item sits in the pack.
-        var hideCandidate = carriedItem.Item;
-        if (hideCandidate.NotDroppable)
-        {
-            await _client.SendLineAsync("You may not hide that item!");
-            return;
-        }
+            if ((hideCandidate.Abilities.ContainsKey(ItemCursedAbilityId)
+                    || hideCandidate.Abilities.ContainsKey(ItemMajorCurseAbilityId))
+                && _player.Equipment.ContainsValue(carriedItem.ItemId)
+                && !_player.Inventory.Contains(carriedItem.ItemId))
+            {
+                hideStopMessage = "You may not hide that item!";
+                break;
+            }
 
-        if ((hideCandidate.Abilities.ContainsKey(ItemCursedAbilityId)
-                || hideCandidate.Abilities.ContainsKey(ItemMajorCurseAbilityId))
-            && _player.Equipment.ContainsValue(carriedItem.ItemId)
-            && !_player.Inventory.Contains(carriedItem.ItemId))
-        {
-            await _client.SendLineAsync("You may not hide that item!");
-            return;
-        }
+            if (!TryRemoveResolvedCarriedItem(carriedItem, out _))
+            {
+                hideStopMessage = $"You don't have {itemTarget} to hide!";
+                break;
+            }
 
-        if (!TryRemoveResolvedCarriedItem(carriedItem, out _))
-        {
-            await _client.SendLineAsync($"You don't have {target} to hide!");
-            return;
-        }
+            int itemId = carriedItem.ItemId;
+            long instanceId = carriedItem.InstanceId;
 
-        int itemId = carriedItem.ItemId;
-        long instanceId = carriedItem.InstanceId;
+            RemoveLightStateIfNotCarried(instanceId);
 
-        RemoveLightStateIfNotCarried(instanceId);
+            var item = carriedItem.Item;
 
-        var item = carriedItem.Item;
+            // Hide in room: "There is no room to hide %s here." only when the room's 15 hidden SLOTS are full.
+            // Stock has no separate per-copy count — the room add returns -1 only when no slot is left,
+            // and a stackable copy of an item already hidden here shares its slot (so 50 orc heads fit).
+            if (!_world.HideItemInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, itemId, instanceId, reservedSlots: staticHidden))
+            {
+                AddItemToInventory(itemId, instanceId);
+                RecalcEquipment();
+                hideStopMessage = $"There is no room to hide {item.Name} here.";
+                break;
+            }
 
-        // "There is no room to hide %s here." — room has a max of 15 hidden item slots
-        var room = _world.GetRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber);
-        var hiddenInRoom = _world.GetHiddenGroundItems(_player.CurrentMapNumber, _player.CurrentRoomNumber);
-        var staticHidden = room?.GetHiddenItemIds()?.Count ?? 0;
-        if (hiddenInRoom.Count + staticHidden >= 15)
-        {
-            // Can't hide — give item back to inventory
-            AddItemToInventory(itemId, instanceId);
             RecalcEquipment();
-            await _client.SendLineAsync($"There is no room to hide {item.Name} here.");
-            return;
+            hiddenName = item.Name;
+            hiddenCount++;
         }
 
-        // Hide in room. Same -1 contract as the drop path, against the 15 hidden slots.
-        if (!_world.HideItemInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, itemId, instanceId))
-        {
-            AddItemToInventory(itemId, instanceId);
-            RecalcEquipment();
-            await _client.SendLineAsync($"There is no room to hide {item.Name} here.");
-            return;
-        }
+        // "You hid %s." — a run that hid one copy is exactly the stock line.
+        if (hiddenCount > 0)
+            await _client.SendLineAsync($"You hid {CountedItemText(hiddenCount, hiddenName)}.");
 
-        RecalcEquipment();
-
-        // "You hid %s."
-        await _client.SendLineAsync($"You hid {item.Name}.");
+        if (hideStopMessage != null)
+            await _client.SendLineAsync(hideStopMessage);
     }
 
     private async Task HandleLight(string target)

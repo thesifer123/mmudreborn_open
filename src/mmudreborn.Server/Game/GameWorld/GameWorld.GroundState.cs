@@ -259,9 +259,10 @@ public partial class GameWorld
 
     /// <summary>
     /// True when the pile can accept this item — either it stacks onto a slot it already occupies, or a
-    /// free slot remains. Caller must hold _groundItemLock.
+    /// free slot remains. `reservedSlots` counts slots held outside this pile (a room's static hidden
+    /// items, which are never materialized into it). Caller must hold _groundItemLock.
     /// </summary>
-    private bool HasGroundSlotFor(List<GroundItemEntry> entries, int itemId, long instanceId, bool hidden)
+    private bool HasGroundSlotFor(List<GroundItemEntry> entries, int itemId, long instanceId, bool hidden, int reservedSlots = 0)
     {
         if (!GroundItemLimitEnabled)
             return true;
@@ -276,7 +277,7 @@ public partial class GameWorld
         }
 
         int cap = hidden ? StockHiddenGroundSlots : StockVisibleGroundSlots;
-        return CountGroundSlotsUsed(entries, hidden) < cap;
+        return CountGroundSlotsUsed(entries, hidden) + reservedSlots < cap;
     }
 
     private bool CanMaterializeGroundItem(int itemId)
@@ -585,7 +586,7 @@ public partial class GameWorld
         return true;
     }
 
-    public bool HideItemInRoom(int mapNumber, int roomNumber, int itemId, long? instanceId = null)
+    public bool HideItemInRoom(int mapNumber, int roomNumber, int itemId, long? instanceId = null, int reservedSlots = 0)
     {
         if (!CanMaterializeGroundItem(itemId))
             return false;
@@ -598,7 +599,7 @@ public partial class GameWorld
             if (!_roomGroundItems.ContainsKey(key))
                 _roomGroundItems[key] = [];
 
-            if (!HasGroundSlotFor(_roomGroundItems[key], itemId, resolvedInstanceId, hidden: true))
+            if (!HasGroundSlotFor(_roomGroundItems[key], itemId, resolvedInstanceId, hidden: true, reservedSlots))
                 return false;
 
             _roomGroundItems[key].Add(new GroundItemEntry

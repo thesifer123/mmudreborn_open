@@ -2,8 +2,8 @@ using System;
 
 namespace mmudreborn.Server;
 
-// QOL: a leading COUNT on the item forms of GET / DROP / GIVE / BUY / SELL — "get 10 torch",
-// "drop 10 torch", "give 10 torch to bob", "buy 5 torch", "sell 100 oaken staff".
+// QOL: a leading COUNT on the item forms of GET / DROP / GIVE / BUY / SELL / HIDE — "get 10 torch",
+// "drop 10 torch", "give 10 torch to bob", "buy 5 torch", "sell 100 oaken staff", "hide 50 orc head".
 // Stock only ever counts coins ("get 8 silver"), so an item count is a pure
 // convenience and lives behind QolFeature.BulkQuantity (SYSOP CONFIGURE QOL qty). With the feature off
 // the leading number is not special and the verbs behave exactly as they do in stock.
