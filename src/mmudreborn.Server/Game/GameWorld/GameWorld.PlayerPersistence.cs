@@ -148,6 +148,12 @@ public partial class GameWorld
             catch (Exception ex)
             {
                 GameDiagnostics.RecordBackgroundException(ex, "persistence");
+                // A failed write (e.g. the database briefly unavailable) must not lose the player's progress:
+                // the mark was already removed above, so put it back and the next flush retries with the
+                // then-latest state. Only while this exact session is still online — after a logout the
+                // synchronous logout save is authoritative — and TryAdd, so a fresher mark is left alone.
+                if (_onlinePlayers.TryGetValue(name, out var stillOnline) && ReferenceEquals(stillOnline, player))
+                    _dirtyPlayers.TryAdd(name, player);
                 if (GameDiagnostics.RethrowBackgroundExceptions) throw;
             }
         }
