@@ -597,7 +597,6 @@ public class Monster
     public double ExpMulti { get; set; }
     public int HP { get; set; }
     public int Energy { get; set; }
-    public double AvgDmg { get; set; }
     public int GreetTXT { get; set; }
     public int HPRegen { get; set; }
     public int CharmLVL { get; set; }

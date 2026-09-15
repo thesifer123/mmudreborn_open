@@ -776,7 +776,6 @@ public class GameDatabase : IGameDatabase
                 ExpMulti = reader.GetDouble(reader.GetOrdinal("ExpMulti")),
                 HP = reader.GetInt32(reader.GetOrdinal("HP")),
                 Energy = reader.GetInt32(reader.GetOrdinal("Energy")),
-                AvgDmg = reader.GetDouble(reader.GetOrdinal("AvgDmg")),
                 GreetTXT = reader.GetInt32(reader.GetOrdinal("GreetTXT")),
                 HPRegen = reader.GetInt32(reader.GetOrdinal("HPRegen")),
                 CharmLVL = reader.GetInt32(reader.GetOrdinal("CharmLVL")),

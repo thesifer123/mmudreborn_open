@@ -396,13 +396,14 @@ def parse_monster(rec):
     if number <= 0 or not is_valid_name(name):
         return None
 
-    # Average damage over the attack slots that are in use.
+    # Average melee hit over the in-use MELEE slots (type 1) only. A cast slot (type 2) stores the spell
+    # id, cast chance and cast level in its accuracy/min/max fields — not damage — so it is left out.
     total, count = 0.0, 0
     for i in range(5):
-        if atk_type[i] > 0 and atk_per[i] > 0:
+        if atk_type[i] == 1 and atk_per[i] > 0:
             total += (atk_min[i] + atk_max[i]) / 2.0
             count += 1
-    avg_dmg = round(total / count, 1) if count else 0.0
+    avg_dmg = total / count if count else 0.0
 
     # Attack, drop and mid-combat spell lists are stored packed: in-use entries first, in record
     # order, then zero-filled.

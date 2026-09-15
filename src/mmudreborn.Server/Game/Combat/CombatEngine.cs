@@ -64,8 +64,7 @@ public class CombatEngine
     public const int MonsterPacifierItemAbilityId = 185;
 
     public static bool CanMonsterRetaliate(Monster monster)
-        => monster.AvgDmg > 0
-           || monster.MidSpells.Count > 0
+        => monster.MidSpells.Count > 0
            || monster.Attacks.Any(attack => attack.Percent > 0);
 
     /// <summary>
@@ -2201,23 +2200,13 @@ public class CombatEngine
         int defDodgeSkill = defender.EffectiveDodgeSkill;
         int defDR = GetEffectiveMonsterDamageResist(defender);
 
-        int accuracy;
-        int minDmg;
-        int maxDmg;
-        if (attacker.Template.Attacks.Count > 0)
-        {
-            var attack = SelectMonsterAttack(attacker.Template.Attacks);
-            if (attack == null)
-                return new MonsterVsMonsterResult(MonsterVsMonsterOutcome.Miss, 0);
-            (minDmg, maxDmg) = GetEffectiveMonsterDamageBounds(attacker, attack.Min, attack.Max);
-            accuracy = GetEffectiveMonsterAccuracy(attacker, attack.Accuracy);
-        }
-        else
-        {
-            int defaultMax = Math.Max(1, (int)(attacker.Template.AvgDmg * 2));
-            (minDmg, maxDmg) = GetEffectiveMonsterDamageBounds(attacker, 1, defaultMax);
-            accuracy = GetEffectiveMonsterAccuracy(attacker, 0);
-        }
+        // A monster swings only through its attack slots; one with none makes no melee attack (stock has
+        // no fallback swing — its spells, if any, are cast on their own path).
+        var attack = SelectMonsterAttack(attacker.Template.Attacks);
+        if (attack == null)
+            return new MonsterVsMonsterResult(MonsterVsMonsterOutcome.Miss, 0);
+        var (minDmg, maxDmg) = GetEffectiveMonsterDamageBounds(attacker, attack.Min, attack.Max);
+        int accuracy = GetEffectiveMonsterAccuracy(attacker, attack.Accuracy);
 
         var calc = CalculateAttack(accuracy, defAC, defDodge, minDmg, maxDmg, 0, AttackType.Normal, defDR, defenderDodgeSkill: defDodgeSkill, attackerDefenseless: IsSmashDefenseless(attacker), defenderDefenseless: IsSmashDefenseless(defender));
         if (calc.Missed)
@@ -2267,51 +2256,9 @@ public class CombatEngine
             ? monster.DisplayName
             : $"The {monster.DisplayName}";
 
-        if (monster.Template.Attacks.Count == 0)
-        {
-            monster.CurrentEnergy = Math.Max(0, monster.CurrentEnergy - monster.GetCombatEnergyCap());
-
-            int defaultMax = Math.Max(1, (int)(monster.Template.AvgDmg * 2));
-            var (defaultMinDamage, defaultMaxDamage) = GetEffectiveMonsterDamageBounds(monster, 1, defaultMax);
-            var calc = CalculateAttack(GetEffectiveMonsterAccuracy(monster, 0), playerAC, playerDodge, defaultMinDamage, defaultMaxDamage, 0, AttackType.Normal, defenderDodgeSkill: player.GetCombatDodgeSkill(), attackerDefenseless: IsSmashDefenseless(monster), defenderDefenseless: IsSmashDefenseless(player));
-            int rawDamage = ClampMonsterDamageRoll(calc.Damage, defaultMinDamage, defaultMaxDamage);
-            int damage = calc.Missed ? 0 : Math.Max(0, rawDamage - playerDR);
-
-            if (damage > 0)
-            {
-                player.CurrentHP -= damage;
-                player.RecordDamageSource(monName);   // death log — see the PvP site above
-                result.TotalDamage = damage;
-                result.Hits = 1;
-                string verb = PluralVerb(GetMonsterAttackVerb(weaponType));
-                result.Messages.Add(GameAnsi.CombatHit($"{monName} {verb} you for {damage} damage!"));
-                result.RoomMessages.Add(GameAnsi.CombatHit($"{monName} {verb} {player.Name} for {damage} damage!"));
-
-                ApplyRetaliationToMonsterAttacker(monster, defenderRetaliation, result, messages);
-
-                if (wasConscious && player.CurrentHP <= 0)
-                {
-                    result.Messages.Add(GameAnsi.DropsToTheGround($"{player.Name} drops to the ground!"));
-                    // The drop line broadcasts with no excluded user, so the
-                    // whole room sees it. Without this the drop was private to the person going down.
-                    result.RoomMessages.Add(GameAnsi.DropsToTheGround($"{player.Name} drops to the ground!"));
-                    wasConscious = false;
-                }
-            }
-            else if (calc.Dodged)
-            {
-                // Skill-dodge (outcome 3): "...but you dodge!"
-                result.Messages.Add(GameAnsi.Dodge(GetPlayerDodgeMessage(monName, weaponType, items, monster)));
-                result.RoomMessages.Add(GameAnsi.Dodge(GetObserverDodgeMessage(monName, items, monster, player)));
-            }
-            else
-            {
-                // Plain to-hit miss (outcome 0): the attack lands nowhere, NO dodge clause.
-                result.Messages.Add(GameAnsi.CombatMiss(GetPlayerMissMessage(monName, weaponType, items, monster)));
-                result.RoomMessages.Add(GameAnsi.CombatMiss(GetObserverMissMessage(monName, items, monster, player)));
-            }
-        }
-        else
+        // A monster attacks only through its attack slots; one with none makes no melee swing (stock has
+        // no fallback — its spells, if any, are cast on their own path).
+        if (monster.Template.Attacks.Count > 0)
         {
             for (int swingIndex = 0; swingIndex < MAX_SWINGS && player.CurrentHP > Player.DeathHP; swingIndex++)
             {
