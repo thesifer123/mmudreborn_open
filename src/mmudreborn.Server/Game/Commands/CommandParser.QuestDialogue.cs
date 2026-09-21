@@ -1461,9 +1461,28 @@ public partial class CommandParser
 
                 case "summon":
                     // The `summon` verb: spawn a monster into the current room (reinforcement / boss add).
+                    //
+                    // A REFUSED spawn aborts the REST OF THE LINE and prints NOTHING. In stock the summon
+                    // handler checks whether the spawn succeeded and, if not, drops the remaining ops and
+                    // reports a gate failure, so the script engine falls through to the next line of the
+                    // block — exactly ScriptLineOutcome.NoMatch here. The handler parses ONLY the monster
+                    // id — it has no fail-ref argument and never prints a fail message, so a refusal is
+                    // silent; no stock block passes a second arg to summon, so there is nothing to print
+                    // even in principle.
+                    // A scripted summon is forced, which bypasses the room cap, respawn timer and area cap
+                    // — but NOT the template GameLimit or the unique RegenTime gate. Those two are what
+                    // TrySpawnMonsterInRoom refuses on here (CanSpawnMonster / IsRegenTimerElapsed), so
+                    // the gates line up.
+                    // We used to ignore the result and keep running the line, so a capped or still-cooling
+                    // summon went on to fire its trailing ops (the stacked `summon`s and the closing
+                    // `teleport` in the arena wave blocks 1756-1769/1817-1819, `text 1310` after
+                    // `summon 465` in 1309).
                     applicable = true;
-                    if (args.Length >= 2 && int.TryParse(args[1], out var summonMonsterId) && summonMonsterId > 0)
-                        _world.TrySpawnMonsterInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, summonMonsterId, ignoreRoomRestrictions: true, out _, out _);
+                    if (args.Length >= 2 && int.TryParse(args[1], out var summonMonsterId) && summonMonsterId > 0
+                        && !_world.TrySpawnMonsterInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, summonMonsterId, ignoreRoomRestrictions: true, out _, out _))
+                    {
+                        return ScriptLineOutcome.NoMatch;
+                    }
                     break;
 
                 case "random":
