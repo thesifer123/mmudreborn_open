@@ -926,11 +926,9 @@ public partial class GameWorld
 
     private static bool ShouldRespawnAtEvilDeathRoom(Player player)
     {
-        // Single source of truth: the alignment-band lookup on EvilPoints. The earlier
-        // `player.Alignment < 0` early-out had the inverted-sign legacy field — under stock
-        // semantics (positive = evil) it would have routed Good characters to the evil death
-        // room. Now both branches collapse to one correct check.
-        return CombatEngine.IsEvil(CombatEngine.GetPlayerAlignment(player.EvilPoints));
+        // Stock death/suicide respawn: EvilPoints < 40 → Temple, else Earthen Tomb.
+        // The cut is Outlaw+ (>= 40), NOT the IsEvil band — Seedy (30-39) respawns at the Temple.
+        return player.EvilPoints >= 40;
     }
 
     /// <summary>
