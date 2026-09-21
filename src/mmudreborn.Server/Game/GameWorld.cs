@@ -466,8 +466,9 @@ public partial class GameWorld : IBbsDoorContext
     // QUESTALLPARTY: a quality-of-life toggle for main-quest items that a monster DROPS to the ground on
     // death (the "kill → item drops → pick up → turn in" pattern). In stock only ONE copy drops per kill, so
     // a party of N must kill the monster N times (one turn-in each). ON = hand one copy to EACH engaged
-    // player's inventory instead of a single ground drop. OFF = stock. Default OFF. (Only the curated
-    // CommandParser.QuestPartyDropItemIds set is affected; normal loot is unchanged.)
+    // player who is on that quest step and still needs it, instead of a single ground drop (nobody needing it
+    // = the stock ground drop). OFF = stock. Default OFF. (Only the curated
+    // CommandParser.QuestPartyDropNeeds set is affected; normal loot is unchanged.)
     public bool QuestDropToAllParty { get; private set; }
     // Deepest the alignment scale goes (mudinfo evil/legal spec: "-220 <= Saint < -200"). EP forgiveness
     // drifts a clean player DOWN toward this floor — i.e. all the way to Saint — never stopping at 0.

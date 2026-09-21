@@ -7,8 +7,8 @@ public partial class CommandParser
     // QUESTALLPARTY registry — main-quest items a monster DROPS to the ground on death (its DropItem table),
     // which the player picks up and turns in elsewhere. In stock only ONE copy drops per kill, so a party of
     // N must kill the monster N times (each member needs their own to turn in). With SYSOP CONFIGURE
-    // QUESTALLPARTY ON, HandleMonsterDeath hands one copy to EACH engaged player's inventory instead of
-    // dropping a single copy to the room.
+    // QUESTALLPARTY ON, HandleMonsterDeath hands one copy to each engaged player who still NEEDS it instead
+    // of dropping a single copy to the room.
     //
     // Sourced from the quest walkthrough's "received when you kill" notes, filtered to items that are
     // actually a monster DropItem. The OTHER guide kill-items — Eternal Fire 935, Storm Spirit 941,
@@ -16,32 +16,64 @@ public partial class CommandParser
     // retchweed 927 — are NOT ground drops; they deliver via the boss's area DeathSpell chain (e.g. efreeti's
     // "efreeti temp" #568, Targets 12), which is already room-wide to every engaged player, so they have no
     // party-tedium problem and are intentionally excluded.
-    internal static readonly IReadOnlySet<int> QuestPartyDropItemIds = new HashSet<int>
+    //
+    // Each entry lists the quest step(s) that use the item: the progress flag, the LAST stage at which the
+    // turn-in script still wants it (its `checkability F N` gate — past that the step is done), and how many
+    // copies the step takes. Stages come from the consuming blocks in game_data."TextBlocks" (ticket #24).
+    internal readonly record struct QuestDropNeed(int QuestFlag, int LastStage, int Count = 1);
+
+    internal static readonly IReadOnlyDictionary<int, QuestDropNeed[]> QuestPartyDropNeeds = new Dictionary<int, QuestDropNeed[]>
     {
-        621,   // severed head of Markus     (Commander Markus)
-        622,   // locked wooden box          (Commander Markus)
-        684,   // severed head of Goru-Nezar (Goru-Nezar)
-        776,   // elf-head                   (woodelf ranger/druid/citizen/guard/wardancer)
-        777,   // head of the woodelf lord   (woodelf lord)
-        917,   // gleaming shard             (metallic monstrosity)
-        931,   // iron crown                 (kobold king)
-        948,   // obsidian talisman          (huge obsidian golem)
-        1341,  // red parchment              (Dreadlord of Blood)
-        1683,  // pile of spectral webbing   (arachnigoth / Mayor of Arlysia)
+        [621]  = [new(128, 2)],                               // severed head of Markus     (Commander Markus)   Evil 128(2) Balthazar "reward", TB 437
+        [622]  = [new(126, 5), new(127, 5), new(128, 2)],     // locked wooden box          (Commander Markus)   Good 126(5) TB 353 / Neutral 127(5) TB 380 / Evil 128(2) TB 437
+        [684]  = [new(126, 7)],                               // severed head of Goru-Nezar (Goru-Nezar)         Good 126(7) Annora "head", TB 497
+        [776]  = [new(128, 3, Count: 10)],                    // elf-head ×10               (woodelf ranger/druid/citizen/guard/wardancer)  Evil 128(3), TB 487
+        [777]  = [new(128, 3)],                               // head of the woodelf lord   (woodelf lord)       Evil 128(3), TB 487
+        [917]  = [new(126, 11)],                              // gleaming shard             (metallic monstrosity) Good 126(11) Martok "forge", TB 1128
+        [931]  = [new(128, 5)],                               // iron crown                 (kobold king)        Evil 128(5) shifty dwarf "crown", TB 1291
+        [948]  = [new(128, 9)],                               // obsidian talisman          (huge obsidian golem) Evil 128(9) duergar lord "transport", TB 1309
+        [1341] = [new(128, 17)],                              // red parchment              (Dreadlord of Blood) Evil 128(17) Enigma Lord "bring", TB 9612
+        [1683] = [new(127, 14)],                              // pile of spectral webbing   (arachnigoth / Mayor of Arlysia) Neutral 127(14) gypsy "webbing", TB 9603
     };
 
-    // QUESTALLPARTY: hand ONE copy of a quest ground-drop item to each engaged player's inventory instead of
-    // dropping a single copy to the room. Each non-killer recipient is driven through a CommandParser bound
-    // to THEIR session (so the inventory add + over-encumbrance fallback act on that player), mirroring
-    // ApplyQuestKillProgressAsync. Engaged players are always in the dying monster's room (see
-    // GetMonsterExperienceRecipients), so an over-encumbered recipient's copy falls at their own feet.
-    private async Task DistributeQuestPartyDropAsync(int itemId, IReadOnlyList<Player> engagedPlayers)
+    // Whether a player still needs a copy of a QUESTALLPARTY item: they are ON a quest that uses it (flag
+    // started, >= 1), have not yet passed the step that takes it, and don't already carry enough copies for
+    // that step. A player who never started the quest — or finished that step — gets nothing (ticket #24).
+    internal static bool PlayerNeedsQuestPartyDrop(Player player, int itemId, IReadOnlyList<QuestDropNeed> needs)
     {
+        int carried = player.Inventory.Count(id => id == itemId) + player.Equipment.Values.Count(id => id == itemId);
+        foreach (var need in needs)
+        {
+            int stage = player.GetQuestAbilityValue(need.QuestFlag);
+            if (stage >= 1 && stage <= need.LastStage && carried < need.Count)
+                return true;
+        }
+
+        return false;
+    }
+
+    // QUESTALLPARTY: hand ONE copy of a quest ground-drop item to each engaged player who needs it (see
+    // PlayerNeedsQuestPartyDrop) instead of dropping a single copy to the room. Returns false when nobody
+    // received one — the caller then falls back to the stock single ground drop, so a kill by a party with
+    // no one on the quest still leaves the ordinary drop. Each non-killer recipient is driven through a
+    // CommandParser bound to THEIR session (so the inventory add + over-encumbrance fallback act on that
+    // player), mirroring ApplyQuestKillProgressAsync. Engaged players are always in the dying monster's room
+    // (see GetMonsterExperienceRecipients), so an over-encumbered recipient's copy falls at their own feet.
+    private async Task<bool> TryDistributeQuestPartyDropAsync(int itemId, IReadOnlyList<Player> engagedPlayers)
+    {
+        if (!QuestPartyDropNeeds.TryGetValue(itemId, out var needs))
+            return false;
+
+        bool delivered = false;
         foreach (var player in engagedPlayers)
         {
+            if (!PlayerNeedsQuestPartyDrop(player, itemId, needs))
+                continue;
+
             if (ReferenceEquals(player, _player))
             {
                 await GiveQuestPartyDropAsync(itemId);
+                delivered = true;
                 continue;
             }
 
@@ -51,7 +83,10 @@ public partial class CommandParser
 
             var playerParser = new CommandParser(playerClient, _world, player);
             await playerParser.GiveQuestPartyDropAsync(itemId);
+            delivered = true;
         }
+
+        return delivered;
     }
 
     // Add the quest drop to THIS parser's player. Like a scripted giveitem, an item that would over-encumber

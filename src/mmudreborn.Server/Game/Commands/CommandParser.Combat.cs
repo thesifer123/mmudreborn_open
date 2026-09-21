@@ -2658,16 +2658,17 @@ public partial class CommandParser
             if (!_world.Database.Items.ContainsKey(dropId))
                 continue;
 
-            // QUESTALLPARTY (sysop QoL): a main-quest "drops to ground then turn in" item is handed to EVERY
-            // engaged player instead of dropping a single copy — so a party of N doesn't have to kill the
-            // monster N times to give each member their own turn-in. Off by default (stock single ground drop).
-            if (_world.QuestDropToAllParty && QuestPartyDropItemIds.Contains(dropId))
-                await DistributeQuestPartyDropAsync(dropId, questCreditPlayers);
-            else
-                // Monster loot goes through the room-disposal path, so a full room
-                // spills the hoard into adjacent rooms instead of destroying it.
-                _world.DisposeOfItemInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, dropId,
-                    uses: monster.Template.GetDropUses(dropId));
+            // QUESTALLPARTY (sysop QoL): a main-quest "drops to ground then turn in" item is handed to each
+            // engaged player who is on that quest step and still needs it, instead of dropping a single copy —
+            // so a party of N doesn't have to kill the monster N times to give each member their own turn-in.
+            // When nobody needs it, the stock single ground drop below still happens. Off by default.
+            if (_world.QuestDropToAllParty && await TryDistributeQuestPartyDropAsync(dropId, questCreditPlayers))
+                continue;
+
+            // Monster loot goes through the room-disposal path, so a full room
+            // spills the hoard into adjacent rooms instead of destroying it.
+            _world.DisposeOfItemInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, dropId,
+                uses: monster.Template.GetDropUses(dropId));
         }
 
         // Death message
