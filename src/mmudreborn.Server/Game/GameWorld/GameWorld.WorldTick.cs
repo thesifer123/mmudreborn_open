@@ -2064,7 +2064,9 @@ public partial class GameWorld
 
     private void ProcessMonsterKnockdownTick(MonsterInstance monster)
     {
-        if (!monster.IsKnockedDown)
+        // A dead monster never gets back up (its instance can linger — a Room.NPC primary waits in the
+        // list for revival, and a fresh kill is only removed at the end of the death sequence).
+        if (monster.IsDead || !monster.IsKnockedDown)
             return;
 
         KnockdownKind kind = monster.KnockdownKind;

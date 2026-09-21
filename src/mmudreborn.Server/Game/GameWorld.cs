@@ -1884,6 +1884,11 @@ public partial class GameWorld : IBbsDoorContext
 
     public void RemoveDeadMonster(MonsterInstance monster)
     {
+        // A monster that dies while smashed to the floor must not keep its knockdown: a dead Room.NPC
+        // primary stays in the room list (below), and its expiring timer used to broadcast "Slightly dazed
+        // the <monster> rises from the floor." over its corpse — or it revived already knocked down.
+        monster.ClearKnockdown();
+
         var key = (monster.MapNumber, monster.RoomNumber);
         if (_roomMonsters.TryGetValue(key, out var list))
         {
