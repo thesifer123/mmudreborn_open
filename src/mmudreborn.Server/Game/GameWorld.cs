@@ -1496,6 +1496,14 @@ public partial class GameWorld : IBbsDoorContext
                     deadNpc.RollCarriedTreasure(ShouldGuaranteeFirstDrop(deadNpc.Template));
                     deadNpc.ResetEnergy();
                     deadNpc.ResetDeathProcessing(); // clears CreateSpellFired so the escort re-summons
+                    // A revive is a fresh spawn: nothing from the previous life carries over — not the
+                    // poison it died with, and not a charm bond (a charmed primary killed at home must not
+                    // come back already serving its old owner).
+                    deadNpc.PoisonLevel = 0;
+                    deadNpc.PoisonCooldownTicks = 0;
+                    deadNpc.PlayerOwnerName = null;
+                    deadNpc.IsCharmFresh = false;
+                    deadNpc.FollowAbandonTicks = 0;
                     deadNpc.RespawnAtUtc = null;
                     deadNpc.RespawnTimer = 0;
                     AdjustGlobalCount(deadNpc.Template.Number, 1);
