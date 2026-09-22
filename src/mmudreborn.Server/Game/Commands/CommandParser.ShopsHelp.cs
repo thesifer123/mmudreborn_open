@@ -502,7 +502,7 @@ public partial class CommandParser
         for (int pass = 0; pass < sellQuantity; pass++)
         {
             // Re-resolved every pass: each sale removes an entry and renumbers the inventory beneath it.
-            if (!TryGetShopSaleCandidate(target, "SELL", "sell", requireShopRoom: true, out int inventoryIndex, out long instanceId, out var item, out string errorMessage, out var ambiguousNames))
+            if (!TryGetShopSaleCandidate(target, "SELL", "sell", requireShopRoom: true, out var saleMatch, out var item, out string errorMessage, out var ambiguousNames))
             {
                 if (ambiguousNames != null)
                 {
@@ -518,8 +518,8 @@ public partial class CommandParser
             }
 
             long sellPriceCopper = GetSellPriceCopper(item);
-            TryRemoveInventoryItemAt(inventoryIndex, out _, out _);
-            _world.RemoveItemRuntimeState(instanceId);
+            TryRemoveResolvedCarriedItem(saleMatch, out _);
+            _world.RemoveItemRuntimeState(saleMatch.InstanceId);
             CurrencyHelper.SetFromCopper(_player, CurrencyHelper.ToCopper(_player) + sellPriceCopper);
             RecalcEquipment();
             soldTotalCopper += sellPriceCopper;
@@ -562,7 +562,7 @@ public partial class CommandParser
         if (appraisalRoom == null || appraisalRoom.Shop <= 0)
             return false;
 
-        if (!TryGetShopSaleCandidate(target, "APPRAISE", "appraise", requireShopRoom: false, out _, out _, out var item, out string errorMessage, out var ambiguousNames))
+        if (!TryGetShopSaleCandidate(target, "APPRAISE", "appraise", requireShopRoom: false, out _, out var item, out string errorMessage, out var ambiguousNames))
         {
             if (ambiguousNames != null)
             {
@@ -583,14 +583,12 @@ public partial class CommandParser
         string commandName,
         string actionName,
         bool requireShopRoom,
-        out int inventoryIndex,
-        out long instanceId,
+        out CarriedItemMatch saleMatch,
         out Item item,
         out string errorMessage,
         out IReadOnlyList<string>? ambiguousNames)
     {
-        inventoryIndex = -1;
-        instanceId = 0;
+        saleMatch = default;
         item = null!;
         errorMessage = string.Empty;
         ambiguousNames = null;
@@ -619,7 +617,11 @@ public partial class CommandParser
             return false;
         }
 
-        if (!TryResolveUniqueCarriedItem(target, includeEquipped: false, out var carriedItem, out ambiguousNames))
+        // SYSOP CONFIGURE SELLWORN ON is stock (stock SELL looks the name up across EVERY carried item, worn
+        // included, so worn gear can be sold and counts toward "be more specific"). OFF — the default — keeps
+        // worn gear out of the lookup entirely.
+        bool sellWorn = _world.SellWornEnabled;
+        if (!TryResolveUniqueCarriedItem(target, includeEquipped: sellWorn, out var carriedItem, out ambiguousNames))
         {
             if (ambiguousNames != null)
                 return false;
@@ -628,10 +630,19 @@ public partial class CommandParser
             return false;
         }
 
-        inventoryIndex = carriedItem.InventoryIndex;
-        instanceId = carriedItem.InstanceId;
+        saleMatch = carriedItem;
         item = carriedItem.Item;
         int itemId = carriedItem.ItemId;
+
+        // A cursed item (ability 82/83) the player is wearing can't be sold unless they carry another copy.
+        if (sellWorn
+            && (item.Abilities.ContainsKey(ItemCursedAbilityId) || item.Abilities.ContainsKey(ItemMajorCurseAbilityId))
+            && _player.Equipment.Values.Contains(itemId)
+            && _player.Inventory.Count(id => id == itemId) + _player.Equipment.Values.Count(id => id == itemId) < 2)
+        {
+            errorMessage = "You may not sell that item!";
+            return false;
+        }
 
         if (!shop.Items.Any(shopItem => shopItem.ItemId == itemId))
         {
@@ -655,9 +666,9 @@ public partial class CommandParser
             .Select(candidate => (candidate.ShopItem, Item: candidate.Item!))
             .ToList();
 
-        // Tie-break by match quality: typing "potion" picks the "potion" entry over "healing
-        // potion" / "mana potion" because the user can't be more specific than the full name.
-        var matches = TargetNameMatcher.NarrowToBestMatches(allMatches, m => m.Item.Name, trimmedTarget);
+        // Stock shop-item lookup: an exact name wins ("potion" over "healing potion"); otherwise every
+        // word-prefix match counts the same, so two different items are ambiguous.
+        var matches = TargetNameMatcher.NarrowToExactOrAllMatches(allMatches, m => m.Item.Name, trimmedTarget);
 
         if (matches.Count == 0)
             return false;

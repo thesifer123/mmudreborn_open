@@ -183,43 +183,77 @@ public partial class GameWorld
         }
     }
 
-    /// <summary>Remove one of the named item from stock (the lowest-quantity matching slot).
-    /// Returns the item id removed, or 0 when nothing matched.</summary>
-    public int UnstockGangShopItem(int shopId, string itemName)
+    /// <summary>Stock shop-item lookup: resolve a typed name to ONE stocked item. Word-prefix match
+    /// over the stocked slots; an exact full name wins outright; otherwise exactly one matching
+    /// slot resolves, and two or more are ambiguous (ambiguousNames = what matched, for the "Please be more
+    /// specific" list). Returns the item id, or 0 when nothing matched or the name was ambiguous.</summary>
+    public int ResolveGangShopItemByName(int shopId, string itemName, out IReadOnlyList<string>? ambiguousNames)
     {
+        ambiguousNames = null;
         lock (_gangShopLock)
         {
             if (!_gangShops.TryGetValue(shopId, out var state))
                 return 0;
 
+            var matchedNames = new List<string>();
+            int firstMatchId = 0;
+            foreach (var s in state.Slots)
+            {
+                if (s == null || s.Quantity <= 0 || !Database.Items.TryGetValue(s.ItemId, out var slotItem))
+                    continue;
+
+                var rank = TargetNameMatcher.GetMatchRank(slotItem.Name, itemName);
+                if (rank == TargetNameMatcher.MatchRank.None)
+                    continue;
+                if (rank == TargetNameMatcher.MatchRank.Exact)
+                    return s.ItemId;
+
+                if (firstMatchId == 0)
+                    firstMatchId = s.ItemId;
+                matchedNames.Add(slotItem.Name);
+            }
+
+            if (matchedNames.Count > 1)
+            {
+                ambiguousNames = matchedNames.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                return 0;
+            }
+
+            return firstMatchId;
+        }
+    }
+
+    /// <summary>Remove one of an item from stock — the lowest-quantity slot holding it (the last such slot
+    /// on a tie, as stock scans with &lt;=). Returns false when no slot holds it.</summary>
+    public bool UnstockGangShopItem(int shopId, int itemId)
+    {
+        lock (_gangShopLock)
+        {
+            if (!_gangShops.TryGetValue(shopId, out var state))
+                return false;
+
             int chosen = -1;
             int bestQty = int.MaxValue;
-            int chosenItemId = 0;
             for (int i = 0; i < state.Slots.Length; i++)
             {
                 var s = state.Slots[i];
-                if (s == null || s.Quantity <= 0)
+                if (s == null || s.Quantity <= 0 || s.ItemId != itemId)
                     continue;
-                if (!Database.Items.TryGetValue(s.ItemId, out var slotItem))
-                    continue;
-                if (!slotItem.Name.Contains(itemName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (s.Quantity < bestQty)
+                if (s.Quantity <= bestQty)
                 {
                     bestQty = s.Quantity;
                     chosen = i;
-                    chosenItemId = s.ItemId;
                 }
             }
 
             if (chosen < 0)
-                return 0;
+                return false;
 
             var slot = state.Slots[chosen]!;
             slot.Quantity--;
             if (slot.Quantity <= 0)
                 state.Slots[chosen] = null;
-            return chosenItemId;
+            return true;
         }
     }
 
@@ -245,8 +279,9 @@ public partial class GameWorld
         return dropped;
     }
 
-    /// <summary>Find a buyable slot by item name (for BUY). Returns false when no stocked slot matches.</summary>
-    public bool TryFindGangShopPurchase(int shopId, string itemName, out int slotIndex, out GangShopSlot slot)
+    /// <summary>Find the first stocked slot holding an item (for BUY, after ResolveGangShopItemByName).
+    /// Returns false when no stocked slot holds it.</summary>
+    public bool TryFindGangShopPurchase(int shopId, int itemId, out int slotIndex, out GangShopSlot slot)
     {
         slotIndex = -1;
         slot = new GangShopSlot();
@@ -257,11 +292,7 @@ public partial class GameWorld
             for (int i = 0; i < state.Slots.Length; i++)
             {
                 var s = state.Slots[i];
-                if (s == null || s.Quantity <= 0)
-                    continue;
-                if (!Database.Items.TryGetValue(s.ItemId, out var slotItem))
-                    continue;
-                if (!slotItem.Name.Contains(itemName, StringComparison.OrdinalIgnoreCase))
+                if (s == null || s.Quantity <= 0 || s.ItemId != itemId)
                     continue;
                 slotIndex = i;
                 slot = new GangShopSlot { ItemId = s.ItemId, Quantity = s.Quantity, Price = s.Price, Currency = s.Currency };

@@ -144,8 +144,15 @@ public partial class CommandParser
         }
 
         // UNSTOCK <item>: take one back into inventory.
-        int removedItemId = _world.UnstockGangShopItem(shop.Number, args.Trim());
-        if (removedItemId <= 0 || !_world.Database.Items.TryGetValue(removedItemId, out var item))
+        int removedItemId = _world.ResolveGangShopItemByName(shop.Number, args.Trim(), out var ambiguousStock);
+        if (ambiguousStock != null)
+        {
+            await ShowItemDisambiguationAsync(ambiguousStock);
+            return;
+        }
+        if (removedItemId <= 0
+            || !_world.Database.Items.TryGetValue(removedItemId, out var item)
+            || !_world.UnstockGangShopItem(shop.Number, removedItemId))
         {
             await _client.SendLineAsync("This item is not currently in stock.");
             return;
@@ -193,7 +200,13 @@ public partial class CommandParser
 
     private async Task BuyFromGangShopAsync(Shop shop, string target)
     {
-        if (!_world.TryFindGangShopPurchase(shop.Number, target, out int slotIndex, out var slot) ||
+        int wantedItemId = _world.ResolveGangShopItemByName(shop.Number, target, out var ambiguousStock);
+        if (ambiguousStock != null)
+        {
+            await ShowItemDisambiguationAsync(ambiguousStock);
+            return;
+        }
+        if (!_world.TryFindGangShopPurchase(shop.Number, wantedItemId, out int slotIndex, out var slot) ||
             !_world.Database.Items.TryGetValue(slot.ItemId, out var item))
         {
             await _client.SendLineAsync($"You cannot buy {target} here!");

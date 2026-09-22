@@ -668,9 +668,13 @@ public partial class GameWorld
         }
     }
 
-    // Find a gettable ground item by name. Visible (and forced-visible, ability 138) items always
-    // match; a HIDDEN item matches only when its instance is in the searcher's reveal set — you cannot
-    // grab a stash you have not searched up, even by naming it. Mirrors GetVisibleGroundItems' visibility.
+    // Find a gettable ground item by name — the stock `get` lookup. It takes the FIRST
+    // item whose name word-prefix matches — no exact-name preference and no ambiguity prompt —
+    // scanning the VISIBLE items first (forced-visible ability-138 items count as visible), then the hidden
+    // ones. A hidden item matches only when its instance is in the searcher's reveal set: you cannot grab a
+    // stash you have not searched up, even by naming it. A non-gettable item is skipped and the scan moves on.
+    // (Stock also lets an ability-181 item match ANY typed name through an operator-precedence slip; that is
+    // not reproduced — "get sword" must never pick up a gang-house deed.)
     public (int ItemId, int Index) FindGettableGroundItemByName(int mapNumber, int roomNumber, string name, IReadOnlySet<long> revealedHiddenInstanceIds)
     {
         EnsureStaticGroundItemsInitialized(mapNumber, roomNumber);
@@ -679,19 +683,23 @@ public partial class GameWorld
         lock (_groundItemLock)
         {
             if (!_roomGroundItems.TryGetValue(key, out var items)) return (0, -1);
-            for (int index = 0; index < items.Count; index++)
+            foreach (bool hiddenPass in new[] { false, true })
             {
-                GroundItemEntry entry = items[index];
-                if (!Database.Items.TryGetValue(entry.ItemId, out var item))
-                    continue;
+                for (int index = 0; index < items.Count; index++)
+                {
+                    GroundItemEntry entry = items[index];
+                    if (!Database.Items.TryGetValue(entry.ItemId, out var item))
+                        continue;
 
-                bool forcedVisible = item.Abilities.ContainsKey(138);
-                bool visibleToPlayer = !entry.IsHidden || forcedVisible || revealedHiddenInstanceIds.Contains(entry.InstanceId);
-                if (!visibleToPlayer)
-                    continue;
+                    bool listedVisible = !entry.IsHidden || item.Abilities.ContainsKey(138);
+                    if (listedVisible == hiddenPass)
+                        continue;
+                    if (hiddenPass && !revealedHiddenInstanceIds.Contains(entry.InstanceId))
+                        continue;
 
-                if (item.Name.Contains(name, StringComparison.OrdinalIgnoreCase))
-                    return (entry.ItemId, index);
+                    if (item.Gettable && TargetNameMatcher.MatchesWordPrefix(item.Name, name))
+                        return (entry.ItemId, index);
+                }
             }
             return (0, -1);
         }
@@ -818,16 +826,22 @@ public partial class GameWorld
         lock (_groundItemLock)
         {
             if (!_roomGroundItems.TryGetValue(key, out var items)) return (0, -1);
+            // Stock room-item lookup: word-prefix match; an exact full name wins outright,
+            // otherwise the first match in room order.
+            (int ItemId, int Index) firstLoose = (0, -1);
             for (int index = 0; index < items.Count; index++)
             {
                 if (items[index].IsHidden && !includeHidden) continue;
-                if (Database.Items.TryGetValue(items[index].ItemId, out var item))
-                {
-                    if (item.Name.Contains(name, StringComparison.OrdinalIgnoreCase))
-                        return (items[index].ItemId, index);
-                }
+                if (!Database.Items.TryGetValue(items[index].ItemId, out var item))
+                    continue;
+
+                var rank = TargetNameMatcher.GetMatchRank(item.Name, name);
+                if (rank == TargetNameMatcher.MatchRank.Exact)
+                    return (items[index].ItemId, index);
+                if (rank != TargetNameMatcher.MatchRank.None && firstLoose.Index < 0)
+                    firstLoose = (items[index].ItemId, index);
             }
-            return (0, -1);
+            return firstLoose;
         }
     }
 

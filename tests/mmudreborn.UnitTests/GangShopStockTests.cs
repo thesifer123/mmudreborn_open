@@ -95,9 +95,34 @@ public sealed class GangShopStockTests
         var (world, _, _) = CreateWorld();
         world.StockGangShopItem(ShopId, SwordId, 50, 0, false, 0, -1);
 
-        Assert.Equal(SwordId, world.UnstockGangShopItem(ShopId, "iron"));
+        Assert.Equal(SwordId, world.ResolveGangShopItemByName(ShopId, "iron", out _));
+        Assert.True(world.UnstockGangShopItem(ShopId, SwordId));
         Assert.Empty(world.SnapshotGangShopSlots(ShopId));
-        Assert.Equal(0, world.UnstockGangShopItem(ShopId, "iron")); // nothing left
+        Assert.Equal(0, world.ResolveGangShopItemByName(ShopId, "iron", out _)); // nothing left
+        Assert.False(world.UnstockGangShopItem(ShopId, SwordId));
+    }
+
+    // Stock shop-item lookup: a word-prefix match (never a mid-word substring), an exact name wins
+    // outright, and two different loose matches are ambiguous.
+    [Fact]
+    public void Resolve_by_name_is_word_prefix_exact_wins_and_reports_ambiguity()
+    {
+        var (world, _, db) = CreateWorld();
+        db.Items[401] = new Item { Number = 401, Name = "topaz stone", Price = 1, Currency = 0 };
+        db.Items[402] = new Item { Number = 402, Name = "hematite stone", Price = 1, Currency = 0 };
+        db.Items[403] = new Item { Number = 403, Name = "stone", Price = 1, Currency = 0 };
+        world.StockGangShopItem(ShopId, 402, 1, 0, false, 0, -1);
+        world.StockGangShopItem(ShopId, 401, 1, 0, false, 0, -1);
+
+        Assert.Equal(401, world.ResolveGangShopItemByName(ShopId, "t", out var none));
+        Assert.Null(none);
+
+        Assert.Equal(0, world.ResolveGangShopItemByName(ShopId, "st", out var ambiguous));
+        Assert.Equal(new[] { "hematite stone", "topaz stone" }, ambiguous);
+
+        world.StockGangShopItem(ShopId, 403, 1, 0, false, 0, -1);
+        Assert.Equal(403, world.ResolveGangShopItemByName(ShopId, "stone", out var exactNone));
+        Assert.Null(exactNone);
     }
 
     [Fact]
@@ -181,7 +206,7 @@ public sealed class GangShopStockTests
         world.PersistGangShop(ShopId);
         Assert.Single(repo.LoadGangShops());
 
-        world.UnstockGangShopItem(ShopId, "iron");
+        world.UnstockGangShopItem(ShopId, SwordId);
         world.PersistGangShop(ShopId);
 
         Assert.Empty(repo.LoadGangShops());

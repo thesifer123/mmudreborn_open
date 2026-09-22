@@ -17,6 +17,9 @@ public static class TargetNameMatcher
         Exact = 3,             // case-insensitive full-name equality ("shovel" == "shovel")
     }
 
+    // Stock word match: the typed text is a case-insensitive prefix of the name, or of any later word in it.
+    // Words are split on whitespace only (stock steps word to word), so "t" matches
+    // "topaz stone" but never "hematite stone", and "axe" does not match "hand-axe".
     public static bool MatchesWordPrefix(string candidate, string target)
         => GetMatchRank(candidate, target) != MatchRank.None;
 
@@ -85,8 +88,33 @@ public static class TargetNameMatcher
         return narrowed;
     }
 
+    /// <summary>
+    /// Stock's own two-tier rule for item lookups (carried items, room items and shops):
+    /// an exact full-name match wins outright; otherwise EVERY
+    /// word-prefix match is equal — there is no "starts with beats later word" preference —
+    /// so two different loose matches stay ambiguous. Returns the exact matches when any exist, else all
+    /// loose matches, in the caller's scan order.
+    /// </summary>
+    public static List<T> NarrowToExactOrAllMatches<T>(IEnumerable<T> candidates, System.Func<T, string> nameOf, string target)
+    {
+        var loose = new List<T>();
+        var exact = new List<T>();
+        foreach (var candidate in candidates)
+        {
+            var rank = GetMatchRank(nameOf(candidate), target);
+            if (rank == MatchRank.None)
+                continue;
+
+            loose.Add(candidate);
+            if (rank == MatchRank.Exact)
+                exact.Add(candidate);
+        }
+
+        return exact.Count > 0 ? exact : loose;
+    }
+
     private static bool IsWordBoundary(char previous, char current)
     {
-        return !char.IsLetterOrDigit(previous) && char.IsLetterOrDigit(current);
+        return char.IsWhiteSpace(previous) && !char.IsWhiteSpace(current);
     }
 }

@@ -470,6 +470,10 @@ public partial class GameWorld : IBbsDoorContext
     // = the stock ground drop). OFF = stock. Default OFF. (Only the curated
     // CommandParser.QuestPartyDropNeeds set is affected; normal loot is unchanged.)
     public bool QuestDropToAllParty { get; private set; }
+    // SELLWORN: stock SELL/APPRAISE look the name up across every carried item, worn gear included, so a
+    // worn item can be sold straight off the body (a cursed one only while another copy is carried).
+    // ON = that stock behaviour. OFF (default) = worn gear is left out of the SELL/APPRAISE lookup.
+    public bool SellWornEnabled { get; private set; }
     // Deepest the alignment scale goes (mudinfo evil/legal spec: "-220 <= Saint < -200"). EP forgiveness
     // drifts a clean player DOWN toward this floor — i.e. all the way to Saint — never stopping at 0.
     public const float EvilPointForgivenessFloor = -220f;
@@ -677,6 +681,7 @@ public partial class GameWorld : IBbsDoorContext
         EvilCapBlocksActions = PlayerRepo.GetServerSettingInt("EVILCAPBLOCK", 1) != 0;
         SurpriseRoundEnabled = PlayerRepo.GetServerSettingInt("SURPRISEROUND", 0) != 0;
         QuestDropToAllParty = PlayerRepo.GetServerSettingInt("QUESTALLPARTY", 0) != 0;
+        SellWornEnabled = PlayerRepo.GetServerSettingInt("SELLWORN", 0) != 0;
         LoadQolSettings();
         LoadBugTrackerSetting();
         MinEvilPointsEnabled = PlayerRepo.GetServerSettingInt("MINEPS", 0) != 0;
@@ -2368,6 +2373,13 @@ public partial class GameWorld : IBbsDoorContext
     {
         QuestDropToAllParty = enabled;
         PlayerRepo.SetServerSettingInt("QUESTALLPARTY", enabled ? 1 : 0);
+    }
+
+    // SYSOP CONFIGURE SELLWORN <0|1>: let SELL/APPRAISE match gear the player is wearing (stock).
+    public void SetSellWornEnabled(bool enabled)
+    {
+        SellWornEnabled = enabled;
+        PlayerRepo.SetServerSettingInt("SELLWORN", enabled ? 1 : 0);
     }
 
     public void SetMinEvilPointsEnabled(bool enabled)

@@ -93,6 +93,44 @@ public sealed class TargetNameMatcherTests
         Assert.Equal(new[] { "shovel", "shovel" }, narrowed);
     }
 
+    // Bug #239: stock matches the typed text against the START of the name or of a later word —
+    // never a letter inside a word. "t" is in "hematite", but no word of "hematite stone" starts with it.
+    [Theory]
+    [InlineData("topaz stone", "t", true)]
+    [InlineData("hematite stone", "t", false)]
+    [InlineData("hematite stone", "st", true)]
+    [InlineData("topaz stone", "topaz st", true)]
+    public void MatchesWordPrefix_follows_the_dll_word_starts(string candidate, string target, bool expected)
+    {
+        Assert.Equal(expected, TargetNameMatcher.MatchesWordPrefix(candidate, target));
+    }
+
+    // Stock steps word to word on WHITESPACE only: a hyphen or apostrophe does not
+    // start a new word.
+    [Theory]
+    [InlineData("hand-axe", "axe")]
+    [InlineData("thief's dagger", "s")]
+    public void MatchesWordPrefix_splits_words_on_whitespace_only(string candidate, string target)
+    {
+        Assert.False(TargetNameMatcher.MatchesWordPrefix(candidate, target));
+    }
+
+    // Stock item lookups draw only a two-way exact/loose distinction: an exact name wins, but a
+    // "starts with" match does NOT beat a later-word match — both stay, so the caller reports ambiguity.
+    [Fact]
+    public void NarrowToExactOrAllMatches_keeps_every_loose_match_when_none_is_exact()
+    {
+        var names = new[] { "rune dagger", "ancient rune" };
+        Assert.Equal(names, TargetNameMatcher.NarrowToExactOrAllMatches(names, n => n, "rune"));
+    }
+
+    [Fact]
+    public void NarrowToExactOrAllMatches_picks_the_exact_name()
+    {
+        var names = new[] { "black runed shovel", "shovel" };
+        Assert.Equal(new[] { "shovel" }, TargetNameMatcher.NarrowToExactOrAllMatches(names, n => n, "shovel"));
+    }
+
     [Fact]
     public void NarrowToBestMatches_returns_empty_when_nothing_matches()
     {

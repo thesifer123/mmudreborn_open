@@ -408,6 +408,18 @@ public class Room
         return "The room is pitch black - you can't see anything";
     }
 
+    /// <summary>Stock light-level bands: the name bare LIGHT reports ("The current light level is %s").</summary>
+    public static string GetLightLevelName(int effectiveLight)
+    {
+        if (effectiveLight < -200) return "pitch black";
+        if (effectiveLight < -150) return "very dark";
+        if (effectiveLight < -100) return "barely visible";
+        if (effectiveLight < 0) return "dimly lit";
+        if (effectiveLight < 200) return "Regular Light";
+        if (effectiveLight < 900) return "Daylight";
+        return "You are blind!";
+    }
+
     /// <summary>Whether the room is too dark to see contents (below -150).</summary>
     public bool IsTooBlind => IsTooBlindForLight(Light);
 

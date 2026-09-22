@@ -460,7 +460,29 @@ public partial class CommandParser
         return true;
     }
 
-    private List<CarriedItemMatch> FindMatchingCarriedItems(string target, bool includeEquipped)
+    // Stock carried-item lookup: when nothing matches the whole phrase, drop the LAST word and scan
+    // again, repeating until something matches or one word is left — so "drop sword now" finds the
+    // sword, and "drop long sword" with only a long bow carried drops the long bow.
+    // equippedOnly: stock's worn-only scan (used by `remove`) — carried items never match.
+    // accept: stock's item-type filters (food for eat, drink for drink, light for light) — an item the
+    // filter rejects is not a match at all, so it neither wins the exact-name tie nor stops the retry.
+    // retryShorter: false for a caller that strips trailing words itself because it needs to know how many
+    // words the item consumed (USE keeps the rest as its target, as stock reads back the matched word count).
+    private List<CarriedItemMatch> FindMatchingCarriedItems(string target, bool includeEquipped, bool equippedOnly = false, Func<Item, bool>? accept = null, bool retryShorter = true)
+    {
+        string phrase = target.Trim();
+        while (true)
+        {
+            var matches = FindMatchingCarriedItemsForPhrase(phrase, includeEquipped || equippedOnly, equippedOnly, accept);
+            int lastSpace = phrase.LastIndexOf(' ');
+            if (matches.Count > 0 || lastSpace < 0 || !retryShorter)
+                return matches;
+
+            phrase = phrase[..lastSpace].TrimEnd();
+        }
+    }
+
+    private List<CarriedItemMatch> FindMatchingCarriedItemsForPhrase(string target, bool includeEquipped, bool equippedOnly, Func<Item, bool>? accept)
     {
         EnsureItemInstanceAlignment();
 
@@ -469,13 +491,13 @@ public partial class CommandParser
         if (trimmedTarget.Length == 0)
             return matches;
 
-        for (int index = 0; index < _player.Inventory.Count; index++)
+        for (int index = 0; index < _player.Inventory.Count && !equippedOnly; index++)
         {
             int candidateId = _player.Inventory[index];
             if (!_world.Database.Items.TryGetValue(candidateId, out var found))
                 continue;
 
-            if (!TargetNameMatcher.MatchesWordPrefix(found.Name, trimmedTarget))
+            if ((accept != null && !accept(found)) || !TargetNameMatcher.MatchesWordPrefix(found.Name, trimmedTarget))
                 continue;
 
             matches.Add(new CarriedItemMatch(candidateId, found, _player.InventoryInstanceIds[index], index, null));
@@ -488,18 +510,16 @@ public partial class CommandParser
                 if (!_world.Database.Items.TryGetValue(equippedItemId, out var found))
                     continue;
 
-                if (!TargetNameMatcher.MatchesWordPrefix(found.Name, trimmedTarget))
+                if ((accept != null && !accept(found)) || !TargetNameMatcher.MatchesWordPrefix(found.Name, trimmedTarget))
                     continue;
 
                 matches.Add(new CarriedItemMatch(equippedItemId, found, GetEquipmentInstanceId(slot, equippedItemId), -1, slot));
             }
         }
 
-        // Tie-break: when the input matches multiple distinct items at different match qualities,
-        // prefer Exact > PrefixFromStart > WordPrefix. Without this, "shovel" with both "shovel"
-        // and "black runed shovel" in inventory was unresolvable — the user can't type fewer
-        // characters than the full canonical name. See TargetNameMatcher.NarrowToBestMatches.
-        return TargetNameMatcher.NarrowToBestMatches(matches, m => m.Item.Name, trimmedTarget);
+        // Stock tie-break: an exact full name wins ("shovel" over "black runed shovel"); otherwise every
+        // word-prefix match counts the same, so two different items stay ambiguous.
+        return TargetNameMatcher.NarrowToExactOrAllMatches(matches, m => m.Item.Name, trimmedTarget);
     }
 
     private bool TryRemoveResolvedCarriedItem(CarriedItemMatch match, out bool wasEquipped)
@@ -1386,9 +1406,7 @@ public partial class CommandParser
 
         // Wrong-type and not-carried collapse into one silent exit here, exactly as they do in stock:
         // its type check is a separate branch from its NULL check, but both just return.
-        var matches = FindMatchingCarriedItems(args, includeEquipped: false)
-            .Where(m => m.Item.ItemType == requiredType)
-            .ToList();
+        var matches = FindMatchingCarriedItems(args, includeEquipped: false, accept: item => item.ItemType == requiredType);
 
         if (matches.Count == 0)
             return;
@@ -1778,18 +1796,16 @@ public partial class CommandParser
             return;
         }
 
-        // Find equipped item by name
+        // Find equipped item by name. Stock REMOVE: the carried-item lookup restricted to WORN items,
+        // with its multiple-match list discarded — word-prefix match, an exact name wins, otherwise the first
+        // worn match (no "be more specific" prompt).
         string? removeSlot = null;
         int removeItemId = 0;
-        foreach (var (slot, itemId) in _player.Equipment)
+        var wornMatch = FindMatchingCarriedItems(target, includeEquipped: true, equippedOnly: true).FirstOrDefault();
+        if (wornMatch.IsEquipped)
         {
-            if (_world.Database.Items.TryGetValue(itemId, out var item) &&
-                item.Name.Contains(target, StringComparison.OrdinalIgnoreCase))
-            {
-                removeSlot = slot;
-                removeItemId = itemId;
-                break;
-            }
+            removeSlot = wornMatch.EquipmentSlot;
+            removeItemId = wornMatch.ItemId;
         }
 
         if (removeSlot == null)
@@ -2132,77 +2148,69 @@ public partial class CommandParser
             await _client.SendLineAsync(hideStopMessage);
     }
 
-    private async Task HandleLight(string target)
+    // Stock LIGHT. Returns false when stock returns 0 ("not handled"): no light item by that name is
+    // carried, so the caller falls through to the room-action / "Your command had no effect." path.
+    //   bare LIGHT            → "The current light level is %s" (the room's light band);
+    //   2+ light matches      → the "Please be more specific" list;
+    //   spent (recharging)    → "You must recharge that before you may light it again.";
+    //   class/race can't use  → "You may not light that item!";
+    //   something already lit → "You already have something lit!"; otherwise it is lit.
+    // Only ItemType 6 (light source) items take part in the name match at all.
+    private async Task<bool> HandleLight(string target)
     {
         SynchronizeLightState();
+
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            var room = _world.GetRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber);
+            int lightLevel = room == null ? 0 : GetEffectiveRoomLight(room);
+            await _client.SendLineAsync($"The current light level is {Room.GetLightLevelName(lightLevel)}");
+            return true;
+        }
+
+        var lightMatches = FindMatchingCarriedItems(target, includeEquipped: true, accept: item => item.ItemType == LightSourceItemType);
+        var distinctLightNames = lightMatches
+            .Select(match => match.Item.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (distinctLightNames.Count > 1)
+        {
+            await ShowItemDisambiguationAsync(distinctLightNames);
+            return true;
+        }
+
+        if (lightMatches.Count == 0)
+            return false;
+
+        Item item = lightMatches[0].Item;
+        long instanceId = lightMatches[0].InstanceId;
+
+        // Read the state for the recharge check without creating one: the already-lit check below scans
+        // light states and drops empty ones, which would orphan a freshly created record.
+        if (_world.TryGetItemRuntimeState(instanceId, out var existingRuntimeState))
+            NormalizeLightState(instanceId, item, existingRuntimeState, DateTime.UtcNow);
+
+        if (_world.TryGetItemRuntimeState(instanceId, out var rechargeState)
+            && rechargeState.LightRechargeReadyAtUtc > DateTime.UtcNow)
+        {
+            await _client.SendLineAsync("You must recharge that before you may light it again.");
+            return true;
+        }
+
+        if (!CanPlayerUseItem(_player, item))
+        {
+            await _client.SendLineAsync("You may not light that item!");
+            return true;
+        }
 
         if (TryGetSingleActiveLightSource(out _, out _, out _))
         {
             await _client.SendLineAsync("You already have something lit!");
-            return;
+            return true;
         }
 
-        Item item;
-        long instanceId;
-        if (string.IsNullOrWhiteSpace(target))
-        {
-            // No selector: light the first carried/worn light source.
-            if (!TryFindLightSource(target, out _, out item, out instanceId))
-            {
-                await _client.SendLineAsync("You do not have a light source to light.");
-                return;
-            }
-        }
-        else
-        {
-            // Context-aware resolution: match carried/worn items by whole-word prefix (TargetNameMatcher)
-            // and PREFER actual light sources, so "light tor" finds the "torch" rather than stopping on
-            // an item whose name merely contains those letters (the old substring scan lit on
-            // "sTORmhammer" and bailed). Mirrors stock LIGHT resolving through the inventory lookup.
-            var matches = FindMatchingCarriedItems(target, includeEquipped: true);
-            var lightMatches = matches.Where(match => CanItemBeLightSource(match.Item)).ToList();
-            var distinctLightNames = lightMatches
-                .Select(match => match.Item.Name)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            if (distinctLightNames.Count > 1)
-            {
-                await ShowItemDisambiguationAsync(distinctLightNames);
-                return;
-            }
-
-            if (lightMatches.Count == 0)
-            {
-                // A named item that matches but isn't a light source → stock "You cannot light %s.";
-                // only when nothing matches at all do we report having no light source.
-                await _client.SendLineAsync(matches.Count > 0
-                    ? $"You cannot light the {matches[0].Item.Name}."
-                    : "You do not have a light source to light.");
-                return;
-            }
-
-            item = lightMatches[0].Item;
-            instanceId = lightMatches[0].InstanceId;
-        }
-
-        GameWorld.ItemRuntimeState runtimeState;
-        if (_world.TryGetItemRuntimeState(instanceId, out var existingRuntimeState))
-        {
-            runtimeState = existingRuntimeState;
-            NormalizeLightState(instanceId, item, runtimeState, DateTime.UtcNow);
-        }
-        else
-        {
-            runtimeState = _world.GetOrCreateItemRuntimeState(instanceId);
-        }
-
-        if (runtimeState.LightRechargeReadyAtUtc > DateTime.UtcNow)
-        {
-            await _client.SendLineAsync("You must recharge that before you may light it again.");
-            return;
-        }
-
+        var runtimeState = _world.GetOrCreateItemRuntimeState(instanceId);
         runtimeState.LightRechargeReadyAtUtc = DateTime.MinValue;
         var duration = GetRemainingOrDefaultLightDuration(instanceId, item);
         runtimeState.StoredLightRemaining = TimeSpan.Zero;
@@ -2214,7 +2222,10 @@ public partial class CommandParser
             _player.CurrentRoomNumber,
             $"{_player.Name} lights {GetIndefiniteArticle(item.Name)} {item.Name}.",
             _client);
+        return true;
     }
+
+    private const int LightSourceItemType = 6;
 
     // ── Item/Currency Helpers ──────────────────────────────────────────
 
@@ -2392,81 +2403,6 @@ public partial class CommandParser
             return true;
 
         messageId = GenericStockLightBurnoutMessageId;
-        return false;
-    }
-
-    private bool TryFindLightSource(string target, out int itemId, out Item item)
-    {
-        return TryFindLightSource(target, out itemId, out item, out _);
-    }
-
-    private bool TryFindLightSource(string target, out int itemId, out Item item, out long instanceId)
-    {
-        EnsureItemInstanceAlignment();
-
-        itemId = 0;
-        instanceId = 0;
-        item = new Item();
-
-        if (string.IsNullOrWhiteSpace(target))
-        {
-            foreach (var (slot, id) in _player.Equipment)
-            {
-                if (!_world.Database.Items.TryGetValue(id, out var found))
-                    continue;
-                if (!CanItemBeLightSource(found))
-                    continue;
-
-                itemId = id;
-                instanceId = GetEquipmentInstanceId(slot, id);
-                item = found;
-                return true;
-            }
-
-            for (int index = 0; index < _player.Inventory.Count; index++)
-            {
-                int id = _player.Inventory[index];
-                if (!_world.Database.Items.TryGetValue(id, out var found))
-                    continue;
-                if (!CanItemBeLightSource(found))
-                    continue;
-
-                itemId = id;
-                instanceId = _player.InventoryInstanceIds[index];
-                item = found;
-                return true;
-            }
-
-            return false;
-        }
-
-        foreach (var (slot, id) in _player.Equipment)
-        {
-            if (!_world.Database.Items.TryGetValue(id, out var found))
-                continue;
-            if (!found.Name.Contains(target, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            itemId = id;
-            instanceId = GetEquipmentInstanceId(slot, id);
-            item = found;
-            return true;
-        }
-
-        for (int index = 0; index < _player.Inventory.Count; index++)
-        {
-            int id = _player.Inventory[index];
-            if (!_world.Database.Items.TryGetValue(id, out var found))
-                continue;
-            if (!found.Name.Contains(target, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            itemId = id;
-            instanceId = _player.InventoryInstanceIds[index];
-            item = found;
-            return true;
-        }
-
         return false;
     }
 

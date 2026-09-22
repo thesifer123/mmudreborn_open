@@ -909,14 +909,15 @@ public partial class CommandParser
         return true;
     }
 
-    private async Task HandleOpen(string args)
+    // Returns false when stock returns 0 ("not handled") — see TryOpenInventoryItemAsync.
+    private async Task<bool> HandleOpen(string args)
     {
         if (string.IsNullOrWhiteSpace(args))
         {
             // A bare OPEN prints the syntax line "Syntax: OPEN {Direction|Item}",
             // not an invented "Open what?".
             await _client.SendLineAsync("Syntax: OPEN {Direction|Item}");
-            return;
+            return true;
         }
 
         // OPEN with an argument breaks the opener's autocombat before
@@ -928,7 +929,7 @@ public partial class CommandParser
         if (room == null)
         {
             await _client.SendLineAsync("You are in a void!");
-            return;
+            return true;
         }
 
         // Try opening a door/barrier exit first.
@@ -953,7 +954,7 @@ public partial class CommandParser
 
             await BreakSneakAndHideForAction();
             await ApplyActionDelayAsync(OpenCloseDoorFastTicks);   // OPEN: a 1-tick delay
-            return;
+            return true;
         }
 
         // OPEN clears the sneak and hide bits the moment it
@@ -964,7 +965,7 @@ public partial class CommandParser
         {
             await _client.SendLineAsync(message);
             await BreakSneakAndHideForAction();
-            return;
+            return true;
         }
 
         // Once the argument parses as a DIRECTION (n/s/e/w/…/up/down), it's the
@@ -975,27 +976,32 @@ public partial class CommandParser
         if (DirectionAliases.ContainsKey(firstToken))
         {
             await _client.SendLineAsync("That is not a door or a gate!");
-            return;
+            return true;
         }
 
         // Try opening an inventory item (chests, boxes — ItemType 8 with ability 43 linking to a spell).
-        if (await TryOpenInventoryItemAsync(args.Trim()))
-            return;
+        bool? opened = await TryOpenInventoryItemAsync(args.Trim());
+        if (opened == null)
+            return false;
+        if (opened == true)
+            return true;
 
         // An unresolvable non-direction argument re-prints the syntax line, same as the no-arg case.
         await _client.SendLineAsync("Syntax: OPEN {Direction|Item}");
+        return true;
     }
 
-    private async Task<bool> TryOpenInventoryItemAsync(string target)
+    // Returns null when the one matching item is not an openable container (stock "not handled").
+    private async Task<bool?> TryOpenInventoryItemAsync(string target)
     {
-        if (!TryFindOpenableInventoryItem(target, out int inventoryIndex, out var item, out var spell, out var ambiguousNames))
+        if (!TryFindOpenableInventoryItem(target, out int inventoryIndex, out var item, out var spell, out var ambiguousNames, out bool matchedOther))
         {
             if (ambiguousNames != null)
             {
                 await ShowItemDisambiguationAsync(ambiguousNames);
                 return true;
             }
-            return false;
+            return matchedOther ? null : false;
         }
 
         if (_player.InCombat)
@@ -1042,53 +1048,47 @@ public partial class CommandParser
     // Openable items (chests, boxes) use ability 43 to trigger a spell when opened.
     private const int OneTimeCastAbilityId = 43;
 
-    private bool TryFindOpenableInventoryItem(string target, out int inventoryIndex, out Item item, out GameSpell spell, out IReadOnlyList<string>? ambiguousNames)
+    // Stock OPEN's item branch: the carried-item lookup over EVERY carried item (worn too) — two or more
+    // different matches print the "be more specific" list, before the item is looked at. matchedOther is
+    // set when exactly one item matched but it is not an openable container (ItemType 8 with a spell) or
+    // the player may not use it: stock returns "not handled" there, so the command falls through.
+    private bool TryFindOpenableInventoryItem(string target, out int inventoryIndex, out Item item, out GameSpell spell, out IReadOnlyList<string>? ambiguousNames, out bool matchedOther)
     {
         EnsureItemInstanceAlignment();
         ambiguousNames = null;
+        matchedOther = false;
+        inventoryIndex = -1;
+        item = new Item();
+        spell = new GameSpell();
 
-        var openable = new List<(int Index, Item Item, GameSpell Spell)>();
-
-        for (int index = 0; index < _player.Inventory.Count; index++)
-        {
-            int candidateId = _player.Inventory[index];
-            if (!_world.Database.Items.TryGetValue(candidateId, out var found))
-                continue;
-
-            if (found.ItemType != 8)
-                continue;
-
-            int spellId = found.UseSpellId > 0
-                ? found.UseSpellId
-                : found.Abilities.GetValueOrDefault(OneTimeCastAbilityId);
-            if (spellId <= 0 || !_world.Database.Spells.TryGetValue(spellId, out var foundSpell))
-                continue;
-
-            openable.Add((index, found, foundSpell));
-        }
-
-        // Tie-break by match quality so exact-name input wins against longer partial matches.
-        var matches = TargetNameMatcher.NarrowToBestMatches(openable, m => m.Item.Name, target);
-
+        var matches = FindMatchingCarriedItems(target, includeEquipped: true);
         if (matches.Count == 0)
-        {
-            inventoryIndex = -1;
-            item = new Item();
-            spell = new GameSpell();
             return false;
-        }
 
         var distinctNames = matches.Select(m => m.Item.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         if (distinctNames.Count > 1)
         {
             ambiguousNames = distinctNames;
-            inventoryIndex = -1;
-            item = new Item();
-            spell = new GameSpell();
             return false;
         }
 
-        (inventoryIndex, item, spell) = matches[0];
+        var match = matches[0];
+        int spellId = match.Item.UseSpellId > 0
+            ? match.Item.UseSpellId
+            : match.Item.Abilities.GetValueOrDefault(OneTimeCastAbilityId);
+        if (match.IsEquipped
+            || match.Item.ItemType != 8
+            || spellId <= 0
+            || !_world.Database.Spells.TryGetValue(spellId, out var foundSpell)
+            || !CanPlayerUseItem(_player, match.Item))
+        {
+            matchedOther = true;
+            return false;
+        }
+
+        inventoryIndex = match.InventoryIndex;
+        item = match.Item;
+        spell = foundSpell;
         return true;
     }
 

@@ -3349,6 +3349,7 @@ public partial class CommandParser
         ("DISCONNECTITEMS", "Drop-carrier penalty item cost: how many carried/worn items hit the floor. Default 3. Loyal (ability 100) items are never dropped, but a worn Loyal item still consumes a slot of the budget — a stock quirk of the hangup equipment loop. Only applies when DISCONNECTPENALTY is not NONE."),
         ("MINEPS", "Player-set minimum evil points -- non-stock. OFF (default/stock): evil-point forgiveness drifts every character down the scale toward Saint, so a player left scripting overnight loses their band (Outlaw -> Seedy) and update_allowed_worn_items strips the gear that band allowed. ON: a player may type SET MINEPS <amount> to pin a floor the forgiveness tick will not carry them below (SET MINEPS OFF clears it). It never GRANTS evil points -- the standing is still earned by doing the deeds -- and it clamps ONLY the passive drift: the stock FORGIVE refund, quest absolution and sysop changes still move a character freely. Turning this off ignores every stored floor without erasing it."),
         ("QUESTALLPARTY", "Main-quest party-drop convenience. OFF (stock): a main-quest item a monster DROPS on death (gleaming shard, elf-head, the severed heads, iron crown, obsidian talisman, red parchment, spectral webbing, locked wooden box) drops a SINGLE copy to the floor, so a party of N must kill the monster N times — one turn-in each. ON: one copy is placed in the inventory of EACH engaged player who is on that quest and hasn't yet passed the step that uses it (over-encumbrance falls to the floor); if no one in the fight needs it, the stock single floor drop happens instead. Only the curated main-quest ground-drop items are affected; normal loot is unchanged. (The other 'received when you kill' quest items — Eternal Fire, Storm Spirit, Heartstone, etc. — already deliver room-wide via the boss's death-spell and are unaffected.)"),
+        ("SELLWORN", "Selling worn gear. OFF (default): SELL and APPRAISE only look at items in your pack, so gear you are wearing can't be sold (remove it first). ON (stock): SELL/APPRAISE also match worn gear, which counts toward 'Please be more specific' and can be sold straight off your body — except a cursed item you are wearing, which can't be sold unless you carry another copy (\"You may not sell that item!\")."),
     };
 
     private const string ConfigureEpForgivenessNote =
@@ -3450,6 +3451,7 @@ public partial class CommandParser
             await _client.SendLineAsync($"  EVILCAPBLOCK: {(_world.EvilCapBlocksActions ? "ON" : "OFF")} (block maxed-evil players from attacking innocents)");
             await _client.SendLineAsync($"  SURPRISEROUND: {(_world.SurpriseRoundEnabled ? "ON (non-bs weapon: backstab-damage silent surprise)" : "OFF (non-bs weapon: plain normal attack)")} (real backstabs always silent)");
             await _client.SendLineAsync($"  QUESTALLPARTY: {(_world.QuestDropToAllParty ? "ON" : "OFF")} (main-quest ground-drop items go to each engaged party member on that quest step, not one to the floor)");
+            await _client.SendLineAsync($"  SELLWORN: {(_world.SellWornEnabled ? "ON" : "OFF")} (SELL/APPRAISE may match gear you are wearing; ON is stock)");
             await _client.SendLineAsync($"  MINEPS: {(_world.MinEvilPointsEnabled ? "ON" : "OFF")} (players may SET MINEPS <amount> to floor their evil-point forgiveness)");
             await _client.SendLineAsync($"  DEATHLOG: {(_world.DeathLogEnabled ? "ON" : "OFF")} (track the last {Player.MaxDeathLogEntries} deaths + killer, shown on `stat all`; non-stock)");
             await _client.SendLineAsync($"  DISCONNECTPENALTY: {GameWorld.DescribeDisconnectPenaltyLevel(_world.DisconnectPenaltyLevel)} (stock default HIGH; ours NONE) — cost {_world.DisconnectPenaltyMinHpPercent}-{_world.DisconnectPenaltyMaxHpPercent}% MaxHP + up to {_world.DisconnectPenaltyMaxItemsDropped} items");
@@ -3473,6 +3475,7 @@ public partial class CommandParser
             await _client.SendLineAsync("Syntax: SYSOP CONFIGURE EVILCAPBLOCK <on|off>");
             await _client.SendLineAsync("Syntax: SYSOP CONFIGURE SURPRISEROUND <on|off>");
             await _client.SendLineAsync("Syntax: SYSOP CONFIGURE QUESTALLPARTY <on|off>");
+            await _client.SendLineAsync("Syntax: SYSOP CONFIGURE SELLWORN <on|off>");
             await _client.SendLineAsync("Syntax: SYSOP CONFIGURE MINEPS <on|off>");
             await _client.SendLineAsync("Syntax: SYSOP CONFIGURE QOLFUNCTIONS <on|off> (master switch for QOL commands)");
             await _client.SendLineAsync("Syntax: SYSOP CONFIGURE QOL [getall|statall|abil|room|hall|setlook|home|webwho|qty|spells] <on|off|auto>");
@@ -3731,6 +3734,28 @@ public partial class CommandParser
 
             _world.SetQuestDropToAllParty(enabled.Value);
             await _client.SendLineAsync($"QUESTALLPARTY set to {(_world.QuestDropToAllParty ? "ON (each engaged party member receives the quest drop in inventory)" : "OFF (stock — a single copy drops to the ground)")}.");
+            return;
+        }
+        if (setting is "sellworn")
+        {
+            if (tokens.Length == 1)
+            {
+                await _client.SendLineAsync($"SELLWORN is currently {(_world.SellWornEnabled ? "ON" : "OFF")}.");
+                return;
+            }
+
+            var val = tokens[1].ToLowerInvariant();
+            bool? enabled = val is "1" or "on" or "true" or "yes" ? true
+                          : val is "0" or "off" or "false" or "no" ? false
+                          : null;
+            if (enabled is null)
+            {
+                await _client.SendLineAsync("Syntax: SYSOP CONFIGURE SELLWORN <on|off>  (let SELL/APPRAISE match worn gear; ON is stock, default OFF)");
+                return;
+            }
+
+            _world.SetSellWornEnabled(enabled.Value);
+            await _client.SendLineAsync($"SELLWORN set to {(_world.SellWornEnabled ? "ON (stock — worn gear can be sold)" : "OFF (worn gear must be removed before it can be sold)")}.");
             return;
         }
         if (setting is "qolfunctions" or "qolmaster")

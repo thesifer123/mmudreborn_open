@@ -234,143 +234,231 @@ public partial class CommandParser
             return;
         }
 
-        // Look resolution order: self, players in room, monsters in room, equipped items, inventory items, ground items
-        // All use word-prefix matching: the typed text matches the start of ANY word of the name,
-        // not just the first (so "monk" finds "fat dark monk", like "slave" finds "kobold slave" in stock).
-        // Multiple distinct matches = disambiguation prompt.
+        await LookAtNamedTargetAsync(target);
+    }
 
-        // Collect all matchable things as (name, kind, object)
-        var candidates = new List<(string Name, string Kind, object Obj)>();
+    // Stock LOOK for a named target. The target lookup scores every match in one pass:
+    //   1. monsters in the room — the phrase, then the phrase with trailing words dropped, one word at a
+    //      time; an exact full name on the untrimmed phrase wins outright;
+    //   2. players in the room (yourself included) — matched on the FIRST WORD only; a hidden player
+    //      counts only for someone who can see hidden; an exact name wins;
+    //   3. carried items, worn included — an exact name wins; else the first;
+    //   4. room items — an exact name wins; a loose visible match is taken only when
+    //      it is the very first match of the whole scan; a hidden item that is non-gettable or searched
+    //      up is taken outright;
+    //   5. known spells — an exact short or full name wins; else the name counts as a match.
+    // Two or more matches are ambiguous — unless the last kind that matched was a monster (monsters alone
+    // never are). An ambiguous name picks the combat target while in combat, else prints the list.
+    // With no match at all: a shop item, then a coin, then the room's own "look" script, then your own
+    // name, then "You do not see %s here!".
+    private async Task LookAtNamedTargetAsync(string target)
+    {
+        var result = ResolveStockLookTarget(target.Trim());
 
-        // Self
+        if (result.Ambiguous)
+        {
+            var combatTarget = _player.CombatTarget;
+            if (_player.InCombat && combatTarget != null && !combatTarget.IsDead
+                && TargetNameMatcher.MatchesWordPrefix(LookName(combatTarget), target))
+            {
+                await LookAtCandidate((combatTarget.DisplayName, "monster", combatTarget));
+                return;
+            }
+
+            await ShowItemDisambiguationAsync(result.Names);
+            return;
+        }
+
+        if (result.Kind != null)
+        {
+            if (result.Kind == "player" && result.Obj is Player seen && !ReferenceEquals(seen, _player)
+                && seen.IsHidden && !_player.HasSeeHidden)
+            {
+                await _client.SendLineAsync($"{MudAnsi.BrightRed}You do not see {target.Trim()} here!{MudAnsi.Reset}");
+                return;
+            }
+
+            await LookAtCandidate((result.Name, result.Kind, result.Obj!));
+            return;
+        }
+
+        if (await TryLookAtShopItemAsync(target))   // the shop-item display
+            return;
+        if (await TryLookAtCurrencyAsync(target))    // the coin description
+            return;
+
+        // The room's own special-command script ("look book" on the open red book in Tower Bedroom
+        // 10/235, textblock 2931). `look` is a recognized command so it never reaches the default-case
+        // room-action fallback. (Bug #105.)
+        if (await TryHandleRoomAction($"look {target.Trim()}"))
+            return;
+
         if (TargetNameMatcher.MatchesWordPrefix(_player.Name, target))
-            candidates.Add((_player.Name, "player", _player));
-
-        // Other players in room
-        var playersInRoom = _world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player);
-        foreach (var p in playersInRoom)
         {
-            if (TargetNameMatcher.MatchesWordPrefix(p.Name, target))
-                candidates.Add((p.Name, "player", p));
+            await LookAtCandidate((_player.Name, "player", _player));
+            return;
         }
 
-        // Monsters in room
-        var monsters = _world.GetMonstersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber);
-        foreach (var m in monsters)
+        // "You do not see %s here!" (BrightRed), echoing the typed name — NOT the
+        // generic "You don't see that anywhere!" (a different stock string used by other commands).
+        await _client.SendLineAsync($"{MudAnsi.BrightRed}You do not see {target.Trim()} here!{MudAnsi.Reset}");
+    }
+
+    private readonly record struct LookResolution(string? Kind, string Name, object? Obj, bool Ambiguous, List<string> Names);
+
+    private static string LookName(MonsterInstance monster)
+        => string.IsNullOrEmpty(monster.DisplayName) ? monster.Name : monster.DisplayName;
+
+    private LookResolution ResolveStockLookTarget(string target)
+    {
+        var names = new List<string>();
+        int count = 0;
+        string? kind = null;
+        string pickedName = string.Empty;
+        object? picked = null;
+
+        LookResolution Found(string foundKind, string name, object obj) => new(foundKind, name, obj, false, names);
+
+        // 1. Monsters, retried with trailing words dropped (the scan does not stop at a match).
+        var monsters = _world.GetMonstersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber)
+            .Where(monster => !monster.IsDead)
+            .ToList();
+        string phrase = target;
+        bool trimmed = false;
+        while (true)
         {
-            if (!m.IsDead && (TargetNameMatcher.MatchesWordPrefix(m.DisplayName, target) ||
-                             TargetNameMatcher.MatchesWordPrefix(m.Name, target)))
-                candidates.Add((m.DisplayName, "monster", m));
+            foreach (var monster in monsters)
+            {
+                string name = LookName(monster);
+                var rank = TargetNameMatcher.GetMatchRank(name, phrase);
+                if (rank == TargetNameMatcher.MatchRank.None)
+                    continue;
+
+                kind = "monster";
+                if (count == 0)
+                {
+                    picked = monster;
+                    pickedName = monster.DisplayName;
+                }
+                count++;
+                if (!trimmed && rank == TargetNameMatcher.MatchRank.Exact)
+                    return Found("monster", monster.DisplayName, monster);
+                names.Add(name);
+            }
+
+            int lastSpace = phrase.LastIndexOf(' ');
+            if (lastSpace < 0)
+                break;
+            phrase = phrase[..lastSpace].TrimEnd();
+            trimmed = true;
         }
 
-        // Equipped items
-        foreach (var (slot, itemId) in _player.Equipment)
+        // 2. Players (yourself included), on the first word of the phrase only.
+        int firstSpace = target.IndexOf(' ');
+        string firstWord = firstSpace < 0 ? target : target[..firstSpace];
+        var players = new List<Player> { _player };
+        players.AddRange(_world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player));
+        foreach (var candidate in players)
         {
-            if (_world.Database.Items.TryGetValue(itemId, out var item) &&
-                TargetNameMatcher.MatchesWordPrefix(item.Name, target))
-                candidates.Add((item.Name, "item", item));
+            if (!ReferenceEquals(candidate, _player) && candidate.IsHidden && !_player.HasSeeHidden)
+                continue;
+
+            var rank = TargetNameMatcher.GetMatchRank(candidate.Name, firstWord);
+            if (rank == TargetNameMatcher.MatchRank.None)
+                continue;
+
+            kind = "player";
+            count++;
+            picked = candidate;
+            pickedName = candidate.Name;
+            if (rank == TargetNameMatcher.MatchRank.Exact)
+                return Found("player", candidate.Name, candidate);
+            names.Add(candidate.Name);
         }
 
-        // Inventory items
-        foreach (var itemId in _player.Inventory)
+        // 3. Carried items, worn included.
+        var carried = FindMatchingCarriedItems(target, includeEquipped: true);
+        if (carried.Count > 0)
         {
-            if (_world.Database.Items.TryGetValue(itemId, out var item) &&
-                TargetNameMatcher.MatchesWordPrefix(item.Name, target))
-                candidates.Add((item.Name, "item", item));
+            var first = carried[0];
+            if (TargetNameMatcher.GetMatchRank(first.Item.Name, target) == TargetNameMatcher.MatchRank.Exact)
+                return Found("item", first.Item.Name, first.Item);
+
+            var distinctCarried = carried.Select(m => m.Item.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            kind = "item";
+            picked = first.Item;
+            pickedName = first.Item.Name;
+            count += distinctCarried.Count;
+            names.AddRange(distinctCarried);
         }
 
-        // Ground items (visible in room)
+        // 4. Room items: the visible list, then the hidden one.
         var room = _world.GetRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber);
         if (room != null)
         {
             foreach (var itemId in GetVisibleRoomItemIds(room))
             {
-                if (_world.Database.Items.TryGetValue(itemId, out var item) &&
-                    TargetNameMatcher.MatchesWordPrefix(item.Name, target))
-                    candidates.Add((item.Name, "item", item));
+                if (!_world.Database.Items.TryGetValue(itemId, out var item))
+                    continue;
+
+                var rank = TargetNameMatcher.GetMatchRank(item.Name, target);
+                if (rank == TargetNameMatcher.MatchRank.None)
+                    continue;
+                if (rank == TargetNameMatcher.MatchRank.Exact)
+                    return Found("item", item.Name, item);
+
+                count++;
+                if (count == 1)
+                {
+                    kind = "item";
+                    picked = item;
+                    pickedName = item.Name;
+                }
+                names.Add(item.Name);
             }
 
-            // The room item lookup scans a SECOND room array — the hidden-item list (the
-            // HiddenItems field) — after the visible one. Target resolution accepts a hidden
-            // match for look/read when the item is NON-GETTABLE (Gettable == 0): a
-            // permanent room fixture — a sign, pedestal, hole — that is part of the scenery and always
-            // interactable by name without a search (a gettable hidden item still needs the room's
-            // search-revealed bit). These fixtures are described in the room prose, so `look`/`read` must
-            // resolve them. Our go/enter/manipulate path already scans both arrays (RoomContainsObjectNamed);
-            // this brings look/read into line. Fixes the Ancient Library "old parchment" (#990, ItemType 3,
-            // Gettable 0, ReadTextBlock 1416 = the Phoenix lore) in room 9/1008, which was unreadable
-            // because look/read only ever scanned the visible/placed array.
+            // A hidden room item is taken outright when it is a permanent fixture (non-gettable — a sign,
+            // pedestal, hole described in the room prose; e.g. the Ancient Library "old parchment" #990 in
+            // room 9/1008) or has been searched up.
             foreach (var itemId in room.GetHiddenItemIds())
             {
-                if (_world.Database.Items.TryGetValue(itemId, out var item)
-                    && !item.Gettable
-                    && TargetNameMatcher.MatchesWordPrefix(item.Name, target)
-                    && candidates.All(c => !(c.Obj is Item existing && existing.Number == item.Number)))
-                    candidates.Add((item.Name, "item", item));
+                if (_world.Database.Items.TryGetValue(itemId, out var fixture)
+                    && !fixture.Gettable
+                    && TargetNameMatcher.MatchesWordPrefix(fixture.Name, target))
+                    return Found("item", fixture.Name, fixture);
             }
-        }
 
-        if (candidates.Count == 0)
-        {
-            // A look that resolves to a spell shows its description: "look
-            // <spell>" matches a KNOWN spell by its short OR full name and shows its description. It sits
-            // at target-resolution precedence — only reached when nothing physical in the room/inventory
-            // matched, but BEFORE the room CMD special-command fallback below. (Bug #125: `l harm` /
-            // `l enta`.)
-            var spell = FindLookableKnownSpell(target);
-            if (spell != null)
+            var revealed = _player.GetRevealedHiddenItems(room.MapNumber, room.RoomNumber);
+            foreach (var entry in _world.GetHiddenGroundItemsWithInstance(room.MapNumber, room.RoomNumber))
             {
-                await LookAtCandidate((spell.Name, "spell", spell));
-                return;
+                if (revealed.Contains(entry.InstanceId)
+                    && _world.Database.Items.TryGetValue(entry.ItemId, out var searchedUp)
+                    && TargetNameMatcher.MatchesWordPrefix(searchedUp.Name, target))
+                    return Found("item", searchedUp.Name, searchedUp);
             }
-
-            // The unresolved path (in order): a for-sale item in this shop, then a currency type.
-            if (await TryLookAtShopItemAsync(target))   // the shop-item display
-                return;
-            if (await TryLookAtCurrencyAsync(target))    // the coin description
-                return;
-
-            // Nothing in the room/inventory matches: try a "look X" ROOM-action verb (the room.CMD
-            // special-command path) before giving up — e.g. "look book" / "look red book" on the open red
-            // book in Tower Bedroom (10/235, textblock 2931) examines it and teleports toward the Massive
-            // White Dragon. `look` is a recognized command so it never reaches the default-case room-action
-            // fallback in HandleCommand; mirror the read/bash/smash fallback. (Bug #105.)
-            if (await TryHandleRoomAction($"look {target.Trim()}"))
-                return;
-
-            // "You do not see %s here!" (BrightRed), echoing the typed name — NOT the
-            // generic "You don't see that anywhere!" (a different stock string used by other commands).
-            await _client.SendLineAsync($"{MudAnsi.BrightRed}You do not see {target.Trim()} here!{MudAnsi.Reset}");
-            return;
         }
 
-        // Tie-break: when multiple candidates match at different qualities (Exact > PrefixFromStart
-        // > WordPrefix), keep only the strongest tier. Typing "shovel" picks the room's "shovel"
-        // over "black runed shovel" because the user can't be more specific than the full name.
-        candidates = TargetNameMatcher.NarrowToBestMatches(candidates, c => c.Name, target);
-
-        if (candidates.Count == 1)
+        // 5. Known spells.
+        foreach (var spell in GetKnownSpells())
         {
-            await LookAtCandidate(candidates[0]);
-            return;
+            if (!string.IsNullOrWhiteSpace(spell.Short) && spell.Short.Equals(target, StringComparison.OrdinalIgnoreCase))
+                return Found("spell", spell.Name, spell);
+
+            var rank = TargetNameMatcher.GetMatchRank(spell.Name, target);
+            if (rank == TargetNameMatcher.MatchRank.None)
+                continue;
+            if (rank == TargetNameMatcher.MatchRank.Exact)
+                return Found("spell", spell.Name, spell);
+
+            kind = "spell";
+            count++;
+            picked = spell;
+            pickedName = spell.Name;
+            names.Add(spell.Name);
         }
 
-        // Check if all candidates are the same kind+name (e.g. multiple "black rat" monsters)
-        // In that case, just look at the first one — no disambiguation needed
-        var distinctNames = candidates.Select(c => c.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-        if (distinctNames.Count == 1)
-        {
-            await LookAtCandidate(candidates[0]);
-            return;
-        }
-
-        // Disambiguation: "Please be more specific.  You could have meant any of these:" (red)
-        // "-- %s" per candidate (white)
-        await _client.SendLineAsync($"{MudAnsi.BrightRed}Please be more specific.  You could have meant any of these:{MudAnsi.Reset}");
-        foreach (var name in distinctNames)
-        {
-            await _client.SendLineAsync($"{MudAnsi.White}-- {name}{MudAnsi.Reset}");
-        }
+        bool ambiguous = count > 1 && kind != "monster";
+        return new LookResolution(ambiguous ? null : kind, pickedName, picked, ambiguous, names);
     }
 
     private async Task ShowRoomPreview(Room room)
@@ -574,14 +662,17 @@ public partial class CommandParser
             case "player":
                 var lookedAt = (Player)candidate.Obj;
                 await DisplayPlayerDescription(lookedAt);
-                // Looking at ANOTHER visible player tells the room "<You> looks
-                // <them> up and down." and notifies the target "<You> is looking at you." (not for self).
-                if (!ReferenceEquals(lookedAt, _player) && !_player.IsSysopInvisible)
+                // Looking at ANOTHER player tells the room "<You> looks <them> up and down." (only when
+                // neither of you is hidden) and the target "<You> is looking at you." (unless you are hidden).
+                if (!ReferenceEquals(lookedAt, _player) && !_player.IsSysopInvisible && !_player.IsHidden)
                 {
-                    foreach (var observer in _world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player))
+                    if (!lookedAt.IsHidden)
                     {
-                        if (!ReferenceEquals(observer, lookedAt))
-                            _world.SendToPlayer(observer.Name, $"{_player.Name} looks {lookedAt.Name} up and down.");
+                        foreach (var observer in _world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player))
+                        {
+                            if (!ReferenceEquals(observer, lookedAt))
+                                _world.SendToPlayer(observer.Name, $"{_player.Name} looks {lookedAt.Name} up and down.");
+                        }
                     }
                     _world.SendToPlayer(lookedAt.Name, $"{_player.Name} is looking at you.");
                 }
@@ -759,25 +850,6 @@ public partial class CommandParser
     // "look <spell>": resolve a KNOWN spell by its short OR full name, picking the strongest match
     // (Exact > PrefixFromStart > WordPrefix) across both fields — so `l harm` hits short "harm" exactly
     // and `l enta` hits "entangle" by prefix. Returns null when nothing in the spellbook matches.
-    private GameSpell? FindLookableKnownSpell(string target)
-    {
-        GameSpell? best = null;
-        var bestRank = TargetNameMatcher.MatchRank.None;
-        foreach (var spell in GetKnownSpells())
-        {
-            var rank = (TargetNameMatcher.MatchRank)Math.Max(
-                (int)TargetNameMatcher.GetMatchRank(spell.Short, target),
-                (int)TargetNameMatcher.GetMatchRank(spell.Name, target));
-            if (rank > bestRank)
-            {
-                bestRank = rank;
-                best = spell;
-            }
-        }
-
-        return best;
-    }
-
     // The spell description: "<Name> (<Short>):" header (just "<Name>:" when the spell has no
     // short form), then the spell's description lines.
     private async Task ShowKnownSpellDescriptionAsync(GameSpell spell)
@@ -804,24 +876,28 @@ public partial class CommandParser
         if (room == null || !room.IsShopRoom || room.Shop <= 0 || !_world.Database.Shops.TryGetValue(room.Shop, out var shop))
             return false;
 
-        Item? best = null;
-        var bestRank = TargetNameMatcher.MatchRank.None;
-        foreach (var shopItem in shop.Items)
-        {
-            if (!_world.Database.Items.TryGetValue(shopItem.ItemId, out var item))
-                continue;
-            var rank = TargetNameMatcher.GetMatchRank(item.Name, target);
-            if (rank > bestRank)
-            {
-                bestRank = rank;
-                best = item;
-            }
-        }
-
-        if (best == null)
+        // Stock shop-item display: an exact name wins, otherwise every
+        // word-prefix match counts the same — two or more print the "be more specific" list (handled).
+        // A single match is shown only while it is in stock; out of stock falls through to the next check.
+        var candidates = shop.Items
+            .Select(shopItem => (ShopItem: shopItem, Item: _world.Database.Items.GetValueOrDefault(shopItem.ItemId)))
+            .Where(candidate => candidate.Item != null)
+            .Select(candidate => (candidate.ShopItem, Item: candidate.Item!));
+        var matches = TargetNameMatcher.NarrowToExactOrAllMatches(candidates, m => m.Item.Name, target);
+        if (matches.Count == 0)
             return false;
 
-        await LookAtCandidate((best.Name, "item", best));
+        var distinctNames = matches.Select(m => m.Item.Name).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (distinctNames.Count > 1)
+        {
+            await ShowItemDisambiguationAsync(distinctNames);
+            return true;
+        }
+
+        if (!_world.IsShopItemInStock(matches[0].ShopItem))
+            return false;
+
+        await LookAtCandidate((matches[0].Item.Name, "item", matches[0].Item));
         return true;
     }
 
@@ -913,29 +989,22 @@ public partial class CommandParser
 
     private bool TryFindReadableScroll(string target, out int inventoryIndex, out int itemId, out long instanceId, out Item item, out GameSpell spell)
     {
-        EnsureItemInstanceAlignment();
-
-        for (int index = 0; index < _player.Inventory.Count; index++)
+        // The shared stock inventory lookup (word-prefix, exact name wins, trailing-word retry); a name
+        // that matches two different items is not a scroll pick — the caller reports the ambiguity.
+        var matches = FindMatchingCarriedItems(target, includeEquipped: false);
+        if (matches.Count > 0
+            && matches.Select(m => m.Item.Name).Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1)
         {
-            int candidateId = _player.Inventory[index];
-            if (!_world.Database.Items.TryGetValue(candidateId, out var found))
-                continue;
+            inventoryIndex = matches[0].InventoryIndex;
+            itemId = matches[0].ItemId;
+            instanceId = matches[0].InstanceId;
+            item = matches[0].Item;
 
-            if (!TargetNameMatcher.MatchesWordPrefix(found.Name, target))
-                continue;
-
-            inventoryIndex = index;
-            itemId = candidateId;
-            instanceId = _player.InventoryInstanceIds[index];
-            item = found;
-
-            if (TryGetScrollSpell(found, out var foundSpell))
+            if (TryGetScrollSpell(item, out var foundSpell))
             {
                 spell = foundSpell;
                 return true;
             }
-
-            break;
         }
 
         inventoryIndex = -1;
@@ -955,6 +1024,15 @@ public partial class CommandParser
         }
 
         string target = args.Trim();
+
+        // READ is the USE handler (as stock): the carried-item lookup runs first, and two or more
+        // different matches print the "be more specific" list.
+        if (!TryResolveUniqueCarriedItem(target, includeEquipped: true, out _, out var ambiguousReadNames)
+            && ambiguousReadNames != null)
+        {
+            await ShowItemDisambiguationAsync(ambiguousReadNames);
+            return;
+        }
 
         // READ routes through the no-target use handler: an inventory Link-to-Spell scroll
         // is learned here. Shared with the USE verb (see HandleUse) because one handler backs both.

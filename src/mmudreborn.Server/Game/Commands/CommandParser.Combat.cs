@@ -1503,7 +1503,7 @@ public partial class CommandParser
         var words = args.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
         for (int take = words.Length; take >= 1; take--)
         {
-            var matches = FindMatchingCarriedItems(string.Join(' ', words.Take(take)), includeEquipped: true);
+            var matches = FindMatchingCarriedItems(string.Join(' ', words.Take(take)), includeEquipped: true, retryShorter: false);
             if (matches.Count == 0)
                 continue;
 
@@ -1825,7 +1825,7 @@ public partial class CommandParser
         // worn or in the backpack (worn items stay in the same item list, flagged by the worn-slot
         // array). That's why a worn key-item like the glowing red amulet #494 resolves at all — verified
         // against stock. FindMatchingCarriedItems(includeEquipped: true) mirrors this and applies the
-        // Exact > PrefixFromStart > WordPrefix narrowing used elsewhere. (USE then enforces the
+        // stock exact-name-wins narrowing used elsewhere. (USE then enforces the
         // worn/readied requirement separately — see HandleUse.)
         var matches = FindMatchingCarriedItems(selector, includeEquipped: true);
         if (matches.Count == 0)
@@ -1866,25 +1866,14 @@ public partial class CommandParser
         resolvedItemName = string.Empty;
         ambiguousNames = null;
 
-        var matches = FindMatchingCarriedItems(selector, includeEquipped: true)
-            .Where(match => CanItemBeLightSource(match.Item))
-            .ToList();
-
-        if (matches.Count == 0)
+        // Stock USE resolves the item across EVERY carried item first (2+ different matches → the
+        // "be more specific" list), and only a light-source item (ItemType 6) used with no target is
+        // handed to LIGHT.
+        var match = ResolveCarriedUseItem(selector, out string targetArg, out ambiguousNames);
+        if (match == null || targetArg.Length > 0 || match.Value.Item.ItemType != LightSourceItemType)
             return false;
 
-        var distinctNames = matches
-            .Select(match => match.Item.Name)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (distinctNames.Count > 1)
-        {
-            ambiguousNames = distinctNames;
-            return false;
-        }
-
-        resolvedItemName = matches[0].Item.Name;
+        resolvedItemName = match.Value.Item.Name;
         return true;
     }
 

@@ -639,7 +639,10 @@ public partial class CommandParser
                 break;
 
             case "light":
-                await HandleLight(args);
+                // A LIGHT that names no carried light source is "not handled" in stock and falls through
+                // exactly like an unknown command.
+                if (!await HandleLight(args))
+                    await HandleUnhandledCommandAsync(trimmed, cmd, args);
                 break;
 
             // resolver maps eq/arm/wield/wear/ready → "equip"
@@ -861,7 +864,8 @@ public partial class CommandParser
                 break;
 
             case "open":
-                await HandleOpen(args);
+                if (!await HandleOpen(args))
+                    await HandleUnhandledCommandAsync(trimmed, cmd, args);
                 break;
 
             case "close":
@@ -969,31 +973,38 @@ public partial class CommandParser
                 return false;
 
             default:
-                if (await TryHandleRoomAction(trimmed))
-                    break;
-
-                if (await TryHandleDirectSpellCommand(trimmed))
-                    break;
-
-                if (await TryHandleSocialAction(cmd, args))
-                    break;
-
-                // Fast talk mode (SET TALK FAST): unrecognized input is spoken aloud. It echoes "You say ..."
-                // even when the player is alone in the room (speakEvenWithoutAudience) — the whole point of
-                // fast-talk is that what you typed gets said. Slow talk mode keeps the stock no-op message.
-                if (_player.TalkMode == 1)
-                {
-                    await HandleSay(trimmed, speakEvenWithoutAudience: true);
-                }
-                else
-                {
-                    // "Your command had no effect."
-                    await _client.SendLineAsync("Your command had no effect.");
-                }
+                await HandleUnhandledCommandAsync(trimmed, cmd, args);
                 break;
         }
 
         return true;
+    }
+
+    // The path a command takes when nothing handled it — an unknown verb, or a stock command that returned
+    // 0 ("not handled"): room actions, then a direct spell command, then a social, then the no-op line.
+    private async Task HandleUnhandledCommandAsync(string trimmed, string cmd, string args)
+    {
+        if (await TryHandleRoomAction(trimmed))
+            return;
+
+        if (await TryHandleDirectSpellCommand(trimmed))
+            return;
+
+        if (await TryHandleSocialAction(cmd, args))
+            return;
+
+        // Fast talk mode (SET TALK FAST): unrecognized input is spoken aloud. It echoes "You say ..."
+        // even when the player is alone in the room (speakEvenWithoutAudience) — the whole point of
+        // fast-talk is that what you typed gets said. Slow talk mode keeps the stock no-op message.
+        if (_player.TalkMode == 1)
+        {
+            await HandleSay(trimmed, speakEvenWithoutAudience: true);
+        }
+        else
+        {
+            // "Your command had no effect."
+            await _client.SendLineAsync("Your command had no effect.");
+        }
     }
 
 }

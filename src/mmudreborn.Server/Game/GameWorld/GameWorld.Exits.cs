@@ -1163,12 +1163,10 @@ public partial class GameWorld
 
         foreach (var exit in remoteExits)
         {
+            // Stock fires a remote action only when the input equals one of the exit's command phrases
+            // (an exact match against its three message lines) — there is no "any verb naming a room object" shortcut.
             var commands = exit.GetCommandPhrases(Database.Messages).ToList();
-            bool matched = commands.Any(command => PhraseMatches(command, normalizedSpeech));
-            if (!matched && remoteExits.Count == 1)
-                matched = MatchesSingleMechanismRoomAction(room, normalizedSpeech, commands);
-
-            if (!matched)
+            if (!commands.Any(command => PhraseMatches(command, normalizedSpeech)))
                 continue;
 
             // The remote-action branch: Para4 names an item the speaker must be
@@ -1176,10 +1174,18 @@ public partial class GameWorld
             // not fire. With it, stock finds the item in inventory and deducts a charge BEFORE
             // running the action, so firing the trigger SPENDS a charge; a single-use item is destroyed
             // and prints its DestructMsg. The caller does the spending (it owns the inventory + client).
-            if (exit.Para4 > 0 && !PlayerHasItem(player, exit.Para4))
-                return null;
+            // Stock looks the required item up BY NAME (the carried-item lookup with the item's full name,
+            // any carried item, worn or not): an exact name wins, else the first carried item whose name
+            // starts with it — and the charge is spent from whichever item that lookup found.
+            int consumedItemId = 0;
+            if (exit.Para4 > 0)
+            {
+                consumedItemId = FindCarriedItemByRequiredName(player, exit.Para4);
+                if (consumedItemId == 0)
+                    return null;
+            }
 
-            var result = new RemoteActionResult { ConsumedItemId = exit.Para4 > 0 ? exit.Para4 : 0 };
+            var result = new RemoteActionResult { ConsumedItemId = consumedItemId };
             if (Database.Messages.TryGetValue(exit.Para3, out var speechMessage))
             {
                 // Standard message convention: Line1 = first-person to the ACTOR ("You pull the large
@@ -1233,53 +1239,16 @@ public partial class GameWorld
         return null;
     }
 
-    private bool MatchesSingleMechanismRoomAction(Room room, string input, IReadOnlyCollection<string> commands)
+    // The remote-action item lookup: the required item's name run through the stock carried-item match.
+    private int FindCarriedItemByRequiredName(Player player, int requiredItemId)
     {
-        if (commands.Count == 0 || !IsManipulationCommand(input))
-            return false;
+        if (!Database.Items.TryGetValue(requiredItemId, out var required))
+            return PlayerHasItem(player, requiredItemId) ? requiredItemId : 0;
 
-        if (!commands.All(IsManipulationCommand))
-            return false;
-
-        string? noun = ExtractActionNoun(input);
-        if (string.IsNullOrWhiteSpace(noun))
-            return false;
-
-        return RoomContainsObjectNamed(room, noun);
-    }
-
-    private bool RoomContainsObjectNamed(Room room, string noun)
-    {
-        foreach (var itemId in room.GetPlacedItemIds().Concat(room.GetHiddenItemIds()))
-        {
-            if (!Database.Items.TryGetValue(itemId, out var item))
-                continue;
-
-            if (item.Name.Equals(noun, StringComparison.OrdinalIgnoreCase) ||
-                item.Name.StartsWith(noun + " ", StringComparison.OrdinalIgnoreCase) ||
-                item.Name.Contains(" " + noun, StringComparison.OrdinalIgnoreCase))
-                return true;
-        }
-
-        return false;
-    }
-
-    private static bool IsManipulationCommand(string input)
-    {
-        string verb = ExtractActionVerb(input);
-        return verb is "move" or "turn" or "push" or "pull" or "twist";
-    }
-
-    private static string ExtractActionVerb(string input)
-    {
-        var parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length > 0 ? parts[0].Trim().ToLowerInvariant() : string.Empty;
-    }
-
-    private static string? ExtractActionNoun(string input)
-    {
-        var parts = input.Split(' ', 2, StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length == 2 ? parts[1].Trim().ToLowerInvariant() : null;
+        var carried = player.Inventory.Concat(player.Equipment.Values)
+            .Where(id => Database.Items.ContainsKey(id));
+        var matches = TargetNameMatcher.NarrowToExactOrAllMatches(carried, id => Database.Items[id].Name, required.Name);
+        return matches.Count > 0 ? matches[0] : 0;
     }
 
     private static string FormatMessageTemplate(string template, string direction)
