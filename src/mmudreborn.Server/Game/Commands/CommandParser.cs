@@ -710,6 +710,10 @@ public partial class CommandParser
                 break;
 
             case "say":
+                // `say` is not a stock command: stock hands the whole typed line ("say trees") to the room's
+                // text/remote-action exits and CMD script first, then speaks. Mirror that before chatting.
+                if (await TryHandleRoomAction(trimmed))
+                    break;
                 await HandleSay(args);
                 break;
 

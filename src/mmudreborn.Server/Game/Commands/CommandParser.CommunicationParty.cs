@@ -707,29 +707,11 @@ public partial class CommandParser
             return;
         }
 
-        var room = _world.GetRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber);
-        var remoteAction = room == null ? null : _world.TryTriggerRemoteAction(_player, room, message);
-
-        // Dispatcher fallback: an unmatched spoken phrase is run against
-        // the room's special-command block BEFORE it is broadcast —
-        // only a phrase that matches no trigger becomes chatter. The White Forest riddle (room 17/1641
-        // CMD 9556) depends on this: it carries both the "say trees"/"say tree" forms AND bare
-        // "tree"/"tress" forms, so speaking the answer teleports the speaker into the forest instead of
-        // saying it aloud. (Typing the bare keyword already routes through TryHandleRoomAction; this is the
-        // "say <phrase>" path the say verb otherwise swallows.) Try the full "say <phrase>" form first,
-        // then the bare phrase, matching whichever trigger the room author registered. A room with no CMD
-        // textblock returns false immediately, so normal chatter is unaffected.
-        if (remoteAction == null &&
-            (await TryHandleRoomCommandTextBlockAsync($"say {message}")
-             || await TryHandleRoomCommandTextBlockAsync(message)))
-        {
-            return;
-        }
-
-        // Ability 76 (mute) gates ONLY the say/yell broadcast — speech-triggered
-        // room actions (quest/puzzle reveals) run on a separate path that mute does NOT block. So a
-        // muted player can still trigger a remote action; only player-to-player chatter is suppressed.
-        if (remoteAction == null && await IsSilencedByMuteAsync("You cannot speak!"))
+        // Speech never fires a room action: stock matches the raw typed line against the room's exits and
+        // CMD script BEFORE anything is spoken (the `say` case and the unknown-command path both do that
+        // first), and only speaks what nothing claimed. So ".trees" is just chatter, while typing the
+        // literal phrase "say trees" is what solves the White Forest riddle.
+        if (await IsSilencedByMuteAsync("You cannot speak!"))
             return;
 
         // With no VISIBLE audience a say is normally a no-op — and, deliberately, it reads the SAME whether
@@ -738,41 +720,21 @@ public partial class CommandParser
         // typed is meant to be spoken, so it still echoes "You say ..." to the speaker even when alone. This
         // stays leak-safe because fast-talk always echoes regardless of who's present, so it reveals nothing
         // about a hidden occupant either.
-        if (remoteAction == null && !speakEvenWithoutAudience && !HasVisibleRoomSayAudience())
+        if (!speakEvenWithoutAudience && !HasVisibleRoomSayAudience())
         {
             await _client.SendLineAsync("Your command had no effect.");
             return;
         }
 
-        if (remoteAction == null && !await TryConsumeCommunicationAllowanceAsync())
+        if (!await TryConsumeCommunicationAllowanceAsync())
             return;
 
         await BreakSneakAndHideForAction();
 
-        string playerSay = remoteAction?.PlayerSpeechMessage ?? $"You say \"{message}\"";
-        string roomSay = remoteAction?.RoomSpeechMessage ?? $"{_player.Name} says \"{message}\"";
-
-        // Normal say chatter is Green (ESC[0;32m). But when a say triggers a
-        // room action, the action's MESSAGE line ("You say 'Temar Eldanti' out loud.") uses the no-color
-        // prefix — i.e. it inherits the default-text color (White on palettes 0/1, Cyan
-        // on 2/3). The hidden-exit REVEAL ("A gigantic stone door opens…") is emphatic BrightWhite.
-        string defaultText = GameColorPalettes.Resolve(_player.PaletteId).Get(GameColorRole.DefaultText);
-        string playerSayColor = string.IsNullOrWhiteSpace(remoteAction?.PlayerSpeechMessage) ? MudAnsi.Green : defaultText;
-        string roomSayColor = string.IsNullOrWhiteSpace(remoteAction?.RoomSpeechMessage) ? MudAnsi.Green : defaultText;
-
-        await _client.SendLineAsync($"{playerSayColor}{playerSay}{MudAnsi.Reset}");
+        // Normal say chatter is Green (ESC[0;32m).
+        await _client.SendLineAsync($"{MudAnsi.Green}You say \"{message}\"{MudAnsi.Reset}");
         _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber,
-            $"{roomSayColor}{roomSay}{MudAnsi.Reset}", _client);
-
-        if (!string.IsNullOrWhiteSpace(remoteAction?.RevealPlayerMessage))
-            await _client.SendLineAsync($"{MudAnsi.BrightWhite}{remoteAction.RevealPlayerMessage}{MudAnsi.Reset}");
-
-        if (!string.IsNullOrWhiteSpace(remoteAction?.RevealRoomMessage))
-            _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber,
-                $"{MudAnsi.BrightWhite}{remoteAction.RevealRoomMessage}{MudAnsi.Reset}", _client);
-
-        if (remoteAction != null)
-            await ConsumeItemChargeAsync(remoteAction.ConsumedItemId);
+            $"{MudAnsi.Green}{_player.Name} says \"{message}\"{MudAnsi.Reset}", _client);
     }
 
     private bool HasVisibleRoomSayAudience()

@@ -1256,26 +1256,13 @@ public partial class GameWorld
         return template.Replace("%s", direction, StringComparison.OrdinalIgnoreCase).Trim();
     }
 
-    private static bool PhraseMatches(string command, string spokenText)
-    {
-        string normalizedCommand = NormalizePhrase(command);
-        string normalizedSpeech = NormalizePhrase(spokenText);
-        return normalizedCommand == normalizedSpeech;
-    }
-
-    private static string NormalizePhrase(string phrase)
-    {
-        string normalized = phrase.Trim().ToLowerInvariant();
-        if (normalized.StartsWith("say "))
-            normalized = normalized[4..].Trim();
-        else if (normalized.StartsWith("speak "))
-            normalized = normalized[6..].Trim();
-
-        if (normalized.Length >= 2 && normalized.StartsWith("'") && normalized.EndsWith("'"))
-            normalized = normalized[1..^1].Trim();
-
-        return normalized;
-    }
+    // Stock compares the RAW typed line to each command phrase (case-insensitive equality) — no
+    // stripping of a "say"/"speak" verb or quotes on either side. The data spells speech out literally
+    // ("say darkness", "speak faith", "say 'midnight reveals secret knowledge'"), and `say`/`speak` are
+    // not stock commands, so the typed line reaches this check whole. Speech itself (".x", fast-talk)
+    // never fires an action.
+    private static bool PhraseMatches(string command, string typedLine)
+        => string.Equals(command.Trim(), typedLine.Trim(), StringComparison.OrdinalIgnoreCase);
 
     private static bool PlayerHasItem(Player player, int itemId)
     {
