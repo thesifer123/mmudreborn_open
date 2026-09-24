@@ -655,9 +655,14 @@ public partial class GameWorld
                 {
                     // Primary NPCs (Room.NPC) respawn only when a player enters the room
                     // (EnsureRoomNpcPresent), never on a tick timer. Leave the dead instance in
-                    // place for in-room revival on the next entry.
+                    // place for in-room revival on the next entry — unless it chased a player out and
+                    // died away from home, where nothing will revive it: that one is simply dropped.
                     if (dead.IsPermanentNPC)
+                    {
+                        if (!IsAtHomeRoom(dead))
+                            kvp.Value.Remove(dead);
                         continue;
+                    }
 
                     ScheduleLairRespawnAfterVacancy(dead, now);
                     kvp.Value.Remove(dead);
@@ -701,6 +706,8 @@ public partial class GameWorld
         // Player-pets: advance the follow-abandon counter for separated pets and let in-room pets
         // assist their owner against hostile monsters (faithful monster-vs-monster slice).
         ProcessPlayerPetsTick(now);
+        // Hostile locks: the same counter, for a wild monster that has lost the player it is locked on.
+        ProcessHostileLockMisses();
 
         // Stock parity: the spawn driver runs on its own "Monster Generation Rate" timer
         // (in seconds), NOT every medium tick. Running it each 3s medium tick spawned ~5x too

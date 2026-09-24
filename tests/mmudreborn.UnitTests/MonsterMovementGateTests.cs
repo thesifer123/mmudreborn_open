@@ -93,6 +93,20 @@ public class MonsterMovementGateTests
             new Monster { Group = 20 }, Exit(type, para1: lockState)));
     }
 
+    // The field the mover reads is the LIVE one: OPEN writes 0 into it, CLOSE 1, a lock or the
+    // relock timer 2. Every imported door row carries 2, so a door a player has opened must pass on its
+    // live 0 — not stay shut on the imported 2 (bug #240: nothing could follow you through an open door).
+    [Theory]
+    [InlineData(RoomExitType.Door, 0, true)]    // open right now
+    [InlineData(RoomExitType.Door, 1, false)]   // closed
+    [InlineData(RoomExitType.Door, 2, false)]   // locked
+    [InlineData(RoomExitType.Gate, 0, true)]
+    public void Door_and_gate_pass_on_their_live_lock_field_not_the_imported_one(RoomExitType type, int liveLockState, bool expected)
+    {
+        Assert.Equal(expected, GameWorld.CanMonsterTraverseExitType(
+            new Monster { Group = 20 }, Exit(type, para1: 2), liveLockState));
+    }
+
     // Guards (Group 5) are exempt from the door/gate lock, but NOT from the key lock; Group 38 is exempt
     // from all three.
     [Theory]

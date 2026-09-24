@@ -526,31 +526,34 @@ public class CombatEngine
     /// aggression % — which is the monster's <c>FollowPercent</c> field (the same
     /// value that drives pursuit and most-recent-attacker re-target). The legacy <c>Active</c> field is
     /// an in-game/enabled flag (~0), NOT aggression; gating on it disabled the free-attack entirely.
-    /// Alignment decides who may swing: townsfolk/peaceful/guards (0/3/4) only when already engaged,
-    /// evil NPCs (6) never against players with EvilPoints >= <see cref="EvilNpcFreeAttackEvilPointsCap"/>
-    /// everyone else always (engaged or not — a passing player provokes a fresh aggro swing).
+    /// Alignment decides who may swing: townsfolk/peaceful/guards (0/3/4) and the summoned class (Group
+    /// 37) only when LOCKED onto this player (their target-name slot holds this player's name), evil NPCs
+    /// (6) never against players with EvilPoints >= <see cref="EvilNpcFreeAttackEvilPointsCap"/>,
+    /// everyone else always (locked or not — a passing player provokes a fresh aggro swing).
     /// </summary>
-    public static bool IsEligibleDepartingFreeAttacker(int monsterAlign, int monsterAggression, bool engaged, int playerEvilPoints, int roll, int monsterType = 0)
+    public static bool IsEligibleDepartingFreeAttacker(int monsterAlign, int monsterAggression, bool lockedOnPlayer, int playerEvilPoints, int roll, int monsterGroup = 0)
     {
         if (roll > monsterAggression)
             return false;
 
-        // A type-37 (summoned "angel") monster is
-        // folded into the engaged-only (passive) branch alongside align 0/3/4 — it only free-swings a
-        // departing player it is already fighting, never as a fresh aggressor.
-        if (monsterType == SummonAngelMonsterType)
-            return engaged;
+        // The summoned class is Group 37, not a Type: it is
+        // folded into the locked-only (passive) branch alongside align 0/3/4 — it only free-swings a
+        // departing player it is already locked onto, never as a fresh aggressor.
+        if (monsterGroup == SummonedMonsterGroup)
+            return lockedOnPlayer;
 
         return monsterAlign switch
         {
-            0 or 3 or 4 => engaged,
+            0 or 3 or 4 => lockedOnPlayer,
             6 => playerEvilPoints < EvilNpcFreeAttackEvilPointsCap,
             _ => true,
         };
     }
 
-    // Monster Type 37: a summoned "angel" (mirrors GameWorld.SummonedAngelMonsterType).
-    private const int SummonAngelMonsterType = 37;
+    // Monster Group 37: the summoned class ("angels", conjured reinforcements). Every lock/free-swing
+    // exception stock makes for it reads the Group field — never the Solo/Leader/Follower/Stationary
+    // Type, which only runs 0-3.
+    private const int SummonedMonsterGroup = 37;
 
     /// <summary>
     /// When a player's swing engages a monster,
@@ -558,14 +561,17 @@ public class CombatEngine
     /// a roll of 1..99 &lt; FollowPercent — OR unconditionally when the monster is
     /// passive-aligned (0/3/4), which always grabs the most-recent attacker. This is the server mechanic
     /// behind the MegaMUD "attack last" tactic: each swing re-rolls to steal aggro, so the last player to
-    /// swing a beat gets the last roll. A type-5 monster is the exception — it grabs only when currently
-    /// untargeted (<paramref name="currentlyTargeted"/> false), and is never stolen off an existing lock.
-    /// (The summoned/charmed-pet exclusions are applied by
+    /// swing a beat gets the last roll. A Group-5 (Guard) monster is the exception — it grabs only when
+    /// currently untargeted (<paramref name="currentlyTargeted"/> false), and is never stolen off an
+    /// existing lock; a Group-37 (summoned) monster never re-targets at all. Both read the monster's
+    /// Group. (The charmed/owned-pet exclusion is applied by
     /// the caller, which holds the per-instance owner/summoned state.)
     /// </summary>
-    public static bool ShouldRetargetToAttacker(int monsterAlign, int monsterType, int monsterFollowPercent, bool currentlyTargeted, int roll)
+    public static bool ShouldRetargetToAttacker(int monsterAlign, int monsterGroup, int monsterFollowPercent, bool currentlyTargeted, int roll)
     {
-        if (monsterType == 5 && currentlyTargeted)
+        if (monsterGroup == SummonedMonsterGroup)
+            return false;
+        if (monsterGroup == GuardMonsterGroup && currentlyTargeted)
             return false;
 
         bool passiveAlwaysRetargets = monsterAlign is 0 or 3 or 4;
@@ -607,16 +613,17 @@ public class CombatEngine
     /// a pass <c>Lock</c>s onto that player (focus them next beat); a failed roll on an aggressive monster
     /// (align ∉ {0,3,4}) <c>Clear</c>s the lock so it re-spreads to another player next beat — this is the
     /// engine behind party damage-spreading. A passive-aligned monster that fails the roll keeps its
-    /// current lock (<c>Keep</c>). A summoned creature (type 37) never changes its lock, and a type-5
-    /// monster only acquires one when currently untargeted.
+    /// current lock (<c>Keep</c>). A summoned creature (Group 37) never changes its lock, and a Group-5
+    /// (Guard) monster only acquires one when currently untargeted — stock tests the monster's Group for
+    /// both, not its Type.
     /// </summary>
     public static MonsterLockUpdate ResolvePostAttackLock(
-        int monsterAlign, int monsterType, int monsterFollowPercent, bool currentlyTargeted, int roll)
+        int monsterAlign, int monsterGroup, int monsterFollowPercent, bool currentlyTargeted, int roll)
     {
-        if (monsterType == 37)
+        if (monsterGroup == SummonedMonsterGroup)
             return MonsterLockUpdate.Keep;                 // summoned reinforcement: lock never managed here
-        if (monsterType == 5 && currentlyTargeted)
-            return MonsterLockUpdate.Keep;                 // type-5 only acquires a lock when untargeted
+        if (monsterGroup == GuardMonsterGroup && currentlyTargeted)
+            return MonsterLockUpdate.Keep;                 // Guard only acquires a lock when untargeted
 
         if (roll < monsterFollowPercent)
             return MonsterLockUpdate.Lock;

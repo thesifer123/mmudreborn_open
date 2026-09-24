@@ -2382,6 +2382,9 @@ public class MonsterInstance
     public bool IsSummonedCreature { get; set; }
     // Abandon counter: increments each pet-update pass the pet fails to
     // follow its owner; at > FollowAbandonLimit the bond breaks (summoned removed / charmed reverts).
+    // Stock keeps ONE such count per monster, so a wild monster uses it for its hostile lock the same
+    // way: a pass where the locked player is out of reach counts, a swing zeroes it, and past the limit
+    // the lock drops (GameWorld.ProcessHostileLockMisses).
     public int FollowAbandonTicks { get; set; }
     // Combat-pulse gate for a pet's own swing (mirrors Player.NextMonsterAttackAtUtc): a pet attacks
     // a hostile monster at most once per combat round.

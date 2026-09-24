@@ -590,6 +590,11 @@ public partial class CommandParser
         if (!string.IsNullOrWhiteSpace(successMessage))
             await _client.SendLineAsync(successMessage);
 
+        // A text-command exit still moves you through the stock mover, so the departing
+        // free swing applies exactly as on a compass move: after the entry gate, before you leave.
+        if (await TryDepartingMonsterFreeAttackAsync(room))
+            return;
+
         bool wasSneaking = _player.IsSneaking;
         var departingMonsterAttackers = SnapshotDepartingMonsterAttackers(_player, room.MapNumber, room.RoomNumber);
 
@@ -691,6 +696,13 @@ public partial class CommandParser
             // The entry gate keyed on the FOLLOWER's own state (protected room while in
             // combat / retaliating bars them; the gate sends its own message) → dropped.
             if (!await IsRoomEntryAllowedForAsync(follower, followerClient, destinationRoom, currentRoom.RoomType))
+            {
+                DropFollowerFromLeaderParty(follower, null);
+                continue;
+            }
+
+            // The follower's own departing free swing, as on a compass follow (see MoveFollowingPartyMembersAsync).
+            if (await new CommandParser(followerClient, _world, follower).TryDepartingMonsterFreeAttackAsync(currentRoom))
             {
                 DropFollowerFromLeaderParty(follower, null);
                 continue;
@@ -1355,6 +1367,15 @@ public partial class CommandParser
             // The entry gate keyed on the FOLLOWER's own state: a follower in combat /
             // retaliating is barred from a protected room (and the gate sends its own message) → dropped.
             if (!await IsRoomEntryAllowedForAsync(follower, followerClient, followerDestinationRoom, currentRoom.RoomType))
+            {
+                DropFollowerFromLeaderParty(follower, null);
+                continue;
+            }
+
+            // Each follower goes through the stock mover in its own right, so a follower
+            // who isn't sneaking rolls its own departing free swing in the room it is leaving — not only
+            // the leader. A swing that kills or holds/stuns it stops it following.
+            if (await new CommandParser(followerClient, _world, follower).TryDepartingMonsterFreeAttackAsync(currentRoom))
             {
                 DropFollowerFromLeaderParty(follower, null);
                 continue;

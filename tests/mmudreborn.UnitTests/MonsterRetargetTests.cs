@@ -20,7 +20,7 @@ public sealed class MonsterRetargetTests
         int align, int followPercent, int roll, bool expected)
     {
         Assert.Equal(expected,
-            CombatEngine.ShouldRetargetToAttacker(align, monsterType: 1, followPercent, currentlyTargeted: false, roll));
+            CombatEngine.ShouldRetargetToAttacker(align, monsterGroup: 1, followPercent, currentlyTargeted: false, roll));
     }
 
     // Passive-aligned monsters (0 townsfolk, 3 peaceful, 4 lawful) always grab the most-recent
@@ -33,7 +33,7 @@ public sealed class MonsterRetargetTests
     {
         // FollowPercent 0 and a max roll would fail the aggressive path, but passive always grabs.
         Assert.True(
-            CombatEngine.ShouldRetargetToAttacker(align, monsterType: 1, monsterFollowPercent: 0, currentlyTargeted: false, roll: 100));
+            CombatEngine.ShouldRetargetToAttacker(align, monsterGroup: 1, monsterFollowPercent: 0, currentlyTargeted: false, roll: 100));
     }
 
     [Fact]
@@ -41,14 +41,14 @@ public sealed class MonsterRetargetTests
     {
         // Already targeted + a roll that would otherwise win (1 < 99) -> type-5 still refuses to steal.
         Assert.False(
-            CombatEngine.ShouldRetargetToAttacker(monsterAlign: 2, monsterType: 5, monsterFollowPercent: 99, currentlyTargeted: true, roll: 1));
+            CombatEngine.ShouldRetargetToAttacker(monsterAlign: 2, monsterGroup: 5, monsterFollowPercent: 99, currentlyTargeted: true, roll: 1));
     }
 
     [Fact]
     public void Type5_monster_grabs_when_currently_untargeted_and_the_roll_wins()
     {
         Assert.True(
-            CombatEngine.ShouldRetargetToAttacker(monsterAlign: 2, monsterType: 5, monsterFollowPercent: 99, currentlyTargeted: false, roll: 1));
+            CombatEngine.ShouldRetargetToAttacker(monsterAlign: 2, monsterGroup: 5, monsterFollowPercent: 99, currentlyTargeted: false, roll: 1));
     }
 
     [Fact]
@@ -56,7 +56,18 @@ public sealed class MonsterRetargetTests
     {
         // Passive align would always grab, but the type-5 untargeted gate takes precedence.
         Assert.False(
-            CombatEngine.ShouldRetargetToAttacker(monsterAlign: 0, monsterType: 5, monsterFollowPercent: 0, currentlyTargeted: true, roll: 100));
+            CombatEngine.ShouldRetargetToAttacker(monsterAlign: 0, monsterGroup: 5, monsterFollowPercent: 0, currentlyTargeted: true, roll: 100));
+    }
+
+    // Stock tests the monster's Group before any roll: a summoned (Group 37)
+    // monster keeps what it was aimed at — even a passive one, even on a winning roll.
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2)]
+    public void Group37_summoned_monster_never_retargets_to_an_attacker(int align)
+    {
+        Assert.False(
+            CombatEngine.ShouldRetargetToAttacker(align, monsterGroup: 37, monsterFollowPercent: 99, currentlyTargeted: false, roll: 1));
     }
 }
 
@@ -124,7 +135,7 @@ public sealed class MonsterTargetSpreadTests
     public void Post_attack_lock_focuses_or_respreads(int align, int followPercent, int roll, CombatEngine.MonsterLockUpdate expected)
     {
         Assert.Equal(expected,
-            CombatEngine.ResolvePostAttackLock(align, monsterType: 1, followPercent, currentlyTargeted: false, roll));
+            CombatEngine.ResolvePostAttackLock(align, monsterGroup: 1, followPercent, currentlyTargeted: false, roll));
     }
 
     [Fact]
@@ -132,13 +143,13 @@ public sealed class MonsterTargetSpreadTests
     {
         // Type 37 (summoned): even a winning roll leaves the lock untouched.
         Assert.Equal(CombatEngine.MonsterLockUpdate.Keep,
-            CombatEngine.ResolvePostAttackLock(monsterAlign: 2, monsterType: 37, monsterFollowPercent: 99, currentlyTargeted: false, roll: 0));
+            CombatEngine.ResolvePostAttackLock(monsterAlign: 2, monsterGroup: 37, monsterFollowPercent: 99, currentlyTargeted: false, roll: 0));
     }
 
     [Fact]
     public void Type5_monster_keeps_an_existing_lock_post_attack()
     {
         Assert.Equal(CombatEngine.MonsterLockUpdate.Keep,
-            CombatEngine.ResolvePostAttackLock(monsterAlign: 2, monsterType: 5, monsterFollowPercent: 99, currentlyTargeted: true, roll: 0));
+            CombatEngine.ResolvePostAttackLock(monsterAlign: 2, monsterGroup: 5, monsterFollowPercent: 99, currentlyTargeted: true, roll: 0));
     }
 }

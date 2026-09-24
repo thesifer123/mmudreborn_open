@@ -301,16 +301,19 @@ public partial class GameWorld
     }
 
     // An evil NPC (align 6) does not newly
-    // grab a FELLOW-EVIL player — one with EvilPoints > 39 — that it has not actually engaged (the
-    // player issued an attack at it). The gate is `align==6 && EvilPoints > 39 && !combatting`;
-    // that field is EvilPoints (PROVEN: the "Lawful?" prompt seeds it to
+    // grab a FELLOW-EVIL player — one with EvilPoints > 39 — unless that player is fighting it RIGHT
+    // NOW. The gate is `align==6 && EvilPoints > 39 && !fighting`, where fighting means "this player's
+    // autocombat target is this monster AND they are in autocombat" — a live state, not a record that
+    // they once hit it. (Keying this on the never-cleared
+    // engaged set let a duergar an Outlaw had hit once go on picking them for the rest of its life.)
+    // That field is EvilPoints (PROVEN: the "Lawful?" prompt seeds it to
     // = -51, the EvilPoints lawful seed; it is clamped to -200/300, impossible for a Level). This was
     // previously misread as a LEVEL cut, which wrongly spared every level-40+ player (incl. good ones)
     // from evil-NPC aggro. It mirrors the main aggro gate (ShouldMonsterAggro align-6: EP < 40).
-    private static bool IsEligibleSpreadTarget(MonsterInstance monster, Player player)
+    internal static bool IsEligibleSpreadTarget(MonsterInstance monster, Player player)
         => monster.Template.Align != 6
            || player.EvilPoints < CombatEngine.EvilNpcAggroEvilPointsCap
-           || monster.HasEngagedPlayer(player.Name);
+           || (player.InCombat && ReferenceEquals(player.CombatTarget, monster));
 
     // Resolve one monster's single swing against its chosen target, routed to that player's client. The
     // whole beat holds WorldStateGate, so this never races the target's own command processing and the
@@ -345,19 +348,60 @@ public partial class GameWorld
 
     // Post-swing lock roll: focus the just-hit player on a
     // FollowPercent pass, or (aggressive) drop the lock to re-spread next beat. A charmed/summoned pet
-    // serves its owner and never manages a combat lock this way.
-    private void ApplyMonsterPostAttackLock(MonsterInstance monster, string targetName)
+    // serves its owner and never manages a combat lock this way. Runs after EVERY monster swing at a
+    // player — the monster pass and the departing free swing alike — because both are the one stock
+    // monster attack. That attack also zeroes the monster's lost-target counter, so a monster that
+    // is actually landing swings never lets its lock lapse (see ProcessHostileLockMisses).
+    internal void ApplyMonsterPostAttackLock(MonsterInstance monster, string targetName)
     {
+        monster.FollowAbandonTicks = 0;
+
         if (monster.HasPlayerOwner || monster.IsSummonedCreature)
             return;
 
         int roll = _rng.Next(1, 100);   // genrdn(1,100)
         switch (CombatEngine.ResolvePostAttackLock(
-                    monster.Template.Align, monster.Template.Type, monster.Template.FollowPercent,
+                    monster.Template.Align, monster.Template.Group, monster.Template.FollowPercent,
                     monster.HasLockedTarget, roll))
         {
             case CombatEngine.MonsterLockUpdate.Lock: monster.SetLockedTarget(targetName); break;
             case CombatEngine.MonsterLockUpdate.Clear: monster.ClearLockedTarget(); break;
+        }
+    }
+
+    // A hostile lock lapses once its monster has gone 16 updates without reaching the player it names.
+    // The fast monster update counts a miss on every pass where the locked player is offline or in
+    // another room, and past 15 it blanks the target-name slot; any swing zeroes the count
+    // (ApplyMonsterPostAttackLock). Sharing the room is neither a miss nor a reset. Without this a lock
+    // never ended: a duergar that took its departing swing at an Outlaw and then failed its chase roll
+    // would attack them on sight whenever they next met, because a locked monster skips the alignment
+    // test. Stock keeps this count and the pet owner-follow count in the same byte, so it runs on the
+    // pet pass's cadence with the same limit.
+    internal void ProcessHostileLockMisses()
+    {
+        List<MonsterInstance> locked;
+        lock (_monsterLock)
+        {
+            locked = _roomMonsters.Values.SelectMany(list => list)
+                .Where(m => !m.IsDead && !m.HasPlayerOwner && m.HasLockedTarget).ToList();
+        }
+
+        foreach (var monster in locked)
+        {
+            // Exact name only — the slot holds a full name, and a prefix match could hand the lock to a
+            // different, longer-named player while its real target is offline.
+            if (_onlinePlayers.TryGetValue(monster.LockedTargetName!, out var target)
+                && target.CurrentMapNumber == monster.MapNumber
+                && target.CurrentRoomNumber == monster.RoomNumber)
+            {
+                continue;
+            }
+
+            if (++monster.FollowAbandonTicks > PetFollowAbandonLimit)
+            {
+                monster.ClearLockedTarget();
+                monster.FollowAbandonTicks = 0;
+            }
         }
     }
 

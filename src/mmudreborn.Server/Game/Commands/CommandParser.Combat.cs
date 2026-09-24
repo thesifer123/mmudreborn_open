@@ -57,7 +57,7 @@ public partial class CommandParser
 
         int roll = Random.Shared.Next(1, 100);   // [1,99]; top EXCLUSIVE
         if (CombatEngine.ShouldRetargetToAttacker(
-                monster.Template.Align, monster.Template.Type, monster.Template.FollowPercent,
+                monster.Template.Align, monster.Template.Group, monster.Template.FollowPercent,
                 monster.HasLockedTarget, roll))
         {
             monster.SetLockedTarget(_player.Name);
@@ -75,6 +75,11 @@ public partial class CommandParser
         if (_player.IsSysopInvisible || _player.IsSysopNoAggro)
             return false;
 
+        // The stock monster swing refuses outright in a Protected room, so leaving a safe room draws no
+        // free swing — the same hard gate that keeps every other monster attack out of it.
+        if (fromRoom.IsProtected)
+            return false;
+
         // A sneaking player is normally exempt from the departing free swing — EXCEPT
         // against a monster that can see through stealth (ability 57, See Hidden). Stock
         // keeps such a monster (e.g. a Ghost) pursuing/acting on the sneaker, so it still gets its swing —
@@ -86,9 +91,8 @@ public partial class CommandParser
         if (attacker == null)
             return false;
 
-        // The free swing also engages the monster (the attack copies the player's name
-        // into the monster's target slot), so it registers as an incoming attacker and the existing
-        // pursuit logic can follow the player into the next room.
+        // The free swing also engages the monster, so it registers as an incoming attacker and the
+        // existing pursuit logic can follow the player into the next room.
         var activeAttackers = GetActiveIncomingMonsterAttackers();
         bool hadActiveAttackers = activeAttackers.Count > 0;
         QueueMonsterAggro(attacker, activeAttackers, ref hadActiveAttackers);
@@ -99,6 +103,13 @@ public partial class CommandParser
             CombatEngine.BuildRetaliationSources(_player, _world.Database));
         await SendCombatMessagesToCurrentPlayerAsync(result.Messages);
         BroadcastCombatMessagesToRoom(result.RoomMessages);
+
+        // The free swing IS the stock monster attack, so it ends the same way every monster swing
+        // does: the lock roll (a 1-99 roll under FollowPercent copies this player's name into the monster's
+        // target slot). A monster locked on you attacks you whenever you share a room — no alignment
+        // test — and chases you. So an Outlaw (EP 40-79) whom an align-6 duergar never attacks on sight
+        // still gets chased after the swing it takes at them on the way out; only EP 80+ skips the swing.
+        _world.ApplyMonsterPostAttackLock(attacker, _player.Name);
 
         if (result.TargetKilled || _player.CurrentHP <= Player.DeathHP)
         {
@@ -123,9 +134,9 @@ public partial class CommandParser
     // monster's FollowPercent field — NOT the legacy Active field, which is an
     // enabled/in-game flag (~0) and left this mechanic dead (players ran through unharmed). FollowPercent
     // is the same value that governs pursuit and the most-recent-attacker re-target. Townsfolk / peaceful
-    // / guards (align 0/3/4) only swing if already engaged on the player; aggressive mobs swing
-    // engaged-or-not; evil NPCs (align 6) are skipped against players whose EvilPoints are >= 80.
-    // One swing per move.
+    // / guards (align 0/3/4) and summoned (Group 37) monsters only swing if already LOCKED onto the
+    // player; aggressive mobs swing locked-or-not; evil NPCs (align 6) are skipped against players whose
+    // EvilPoints are >= 80. One swing per move.
     private MonsterInstance? SelectDepartingFreeAttacker(Room fromRoom, bool onlySeeHidden)
     {
         int roll = Random.Shared.Next(0, 100);   // [0,99]; top EXCLUSIVE
@@ -151,11 +162,10 @@ public partial class CommandParser
             if (roll > monster.Template.FollowPercent)
                 continue;
 
-            bool engaged = monster.HasEngagedPlayer(_player.Name)
-                || _player.CombatTarget == monster
-                || _player.SnapshotIncomingMonsterAttackers().Contains(monster);
-
-            if (CombatEngine.IsEligibleDepartingFreeAttacker(monster.Template.Align, monster.Template.FollowPercent, engaged, (int)_player.EvilPoints, roll, monster.Template.Type))
+            // The passive-side test is the monster's target-name slot holding THIS player (the lock) —
+            // not "this player has ever hit it", which never expires.
+            if (CombatEngine.IsEligibleDepartingFreeAttacker(monster.Template.Align, monster.Template.FollowPercent,
+                    monster.IsLockedOnTarget(_player.Name), (int)_player.EvilPoints, roll, monster.Template.Group))
                 return monster;
         }
 

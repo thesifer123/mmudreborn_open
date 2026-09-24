@@ -1,6 +1,7 @@
 using mmudreborn.Data.Models;
 using mmudreborn.Game;
 using mmudreborn.Game.Combat;
+using mmudreborn.Server;
 using Xunit;
 
 namespace mmudreborn.UnitTests;
@@ -32,4 +33,43 @@ public sealed class EvilNpcAggroTests
     [InlineData(250)]  // Villain
     public void Evil_npc_spares_outlaw_and_worse(int ep)
         => Assert.False(CombatEngine.ShouldMonsterAggro(Duergar, WithEvil(ep)));
+
+    // Bug #240. The departing free swing has its OWN cut, EP < 80: stock skips an evil NPC's swing only
+    // at EP 80 and up. So an Outlaw (40-79) is never
+    // attacked on sight yet is still swung at on the way OUT, and only Criminal and worse (80+) are
+    // left alone entirely. Two different cuts, both stock; neither is a bug.
+    [Theory]
+    [InlineData(-250, true)] // Saint
+    [InlineData(39, true)]   // Seedy
+    [InlineData(40, true)]   // Outlaw: spared on sight, still swung at leaving
+    [InlineData(70, true)]   // Outlaw
+    [InlineData(79, true)]   // last Outlaw value
+    [InlineData(80, false)]  // Criminal: never swung at
+    [InlineData(250, false)] // Villain
+    public void Evil_npc_departing_swing_cut_is_EP_80(int ep, bool swings)
+        => Assert.Equal(swings, CombatEngine.IsEligibleDepartingFreeAttacker(
+            monsterAlign: 6, monsterAggression: 90, lockedOnPlayer: false, playerEvilPoints: ep, roll: 0, monsterGroup: 24));
+
+    // The spread pick's fellow-evil exception is "fighting it RIGHT NOW" (the player's autocombat
+    // target is this monster and they are in autocombat) — not "has ever hit it".
+    // The engaged set never clears, so keying on it let a duergar an Outlaw once hit keep picking them
+    // for the rest of its life.
+    [Fact]
+    public void Evil_npc_spread_skips_an_outlaw_who_hit_it_once_but_is_not_fighting_it_now()
+    {
+        var duergar = MonsterInstance.Create(Duergar, 6, 2648);
+        var outlaw = new Player { Name = "Rook", EvilPoints = 70 };
+        duergar.MarkPlayerEngaged(outlaw.Name);
+
+        Assert.False(GameWorld.IsEligibleSpreadTarget(duergar, outlaw));
+    }
+
+    [Fact]
+    public void Evil_npc_spread_may_pick_an_outlaw_who_is_fighting_it_now()
+    {
+        var duergar = MonsterInstance.Create(Duergar, 6, 2648);
+        var outlaw = new Player { Name = "Rook", EvilPoints = 70, InCombat = true, CombatTarget = duergar };
+
+        Assert.True(GameWorld.IsEligibleSpreadTarget(duergar, outlaw));
+    }
 }

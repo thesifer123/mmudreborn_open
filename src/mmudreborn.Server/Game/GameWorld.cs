@@ -1488,7 +1488,9 @@ public partial class GameWorld : IBbsDoorContext
             // Unique timer mobs (chimera, basilisk, …) honor their RegenTime: once killed they stay
             // dead until RegenTime hours have elapsed, even across re-entries. RegenTime==0 / non-
             // unique primaries (slime beast, cave worm, …) are not gated and revive immediately.
-            else if (IsRegenTimerElapsed(npcTemplate))
+            // A primary that locked onto a player and chased them out still holds the latch while it
+            // lives elsewhere (stock clears it only on the primary's death), so it is never doubled.
+            else if (!IsRoomPrimaryAliveAway(room, npcTemplate.Number) && IsRegenTimerElapsed(npcTemplate))
             {
                 // Revive the dead primary in place if its instance is still in the room (preserves
                 // identity, rerolls carried treasure), matching a fresh spawn.
@@ -1913,7 +1915,7 @@ public partial class GameWorld : IBbsDoorContext
             // (ShouldGuaranteeFirstDrop) — so once a boss dies here, its later spawns roll drops normally.
             RecordLimitedMonsterDeath(monster.Template);
 
-            if (monster.IsPermanentNPC)
+            if (monster.IsPermanentNPC && IsAtHomeRoom(monster))
             {
                 // Faithful to stock (the kill clears the primary-present latch): the
                 // primary NPC clears its "present" latch on death and respawns ONLY when a player
@@ -1925,7 +1927,11 @@ public partial class GameWorld : IBbsDoorContext
             }
             else
             {
-                ScheduleLairRespawnAfterVacancy(monster);
+                // A primary that chased a player out and died away from home has no room to be revived
+                // in here — drop it, and its home room spawns it fresh on the next entry. Only a real lair
+                // spawn arms a lair respawn.
+                if (!monster.IsPermanentNPC)
+                    ScheduleLairRespawnAfterVacancy(monster);
                 list.Remove(monster);
                 if (list.Count == 0)
                     _roomMonsters.TryRemove(key, out _);

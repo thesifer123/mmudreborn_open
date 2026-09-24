@@ -283,7 +283,7 @@ public partial class GameWorld
                 // exit-type switch, and the hard 15-slot physical occupancy (NOT the lair MaxRegen cap
                 // — a monster may enter any room with a free slot).
                 if (!CanMonsterEnterRoomByMovement(monster.Template, targetRoom, chosenExit)) continue;
-                if (!CanMonsterTraverseExitType(monster.Template, chosenExit)) continue;
+                if (!CanMonsterTraverseExitType(monster.Template, chosenExit, GetLiveDoorLockState(chosenExit))) continue;
                 if (IsRoomPhysicallyFull(target)) continue;
 
                 movers.Add((monster, kvp.Key, chosenExit, target));
@@ -412,7 +412,7 @@ public partial class GameWorld
             // exit-type switch, the exit's trap, and a free physical slot at the far end.
             if (m.Template.Type == 3 || !CanMonsterEnterRoomByMovement(m.Template, destRoom, exit))
                 continue;
-            if (!CanMonsterTraverseExitType(m.Template, exit))
+            if (!CanMonsterTraverseExitType(m.Template, exit, GetLiveDoorLockState(exit)))
                 continue;
 
             ApplyMonsterExitTrap(m, exit);
@@ -534,7 +534,7 @@ public partial class GameWorld
             if (moved.Contains(monster))
                 continue;
 
-            if (!CanMonsterPursueThroughExit(monster, from, destinationRoom, exit))
+            if (!CanMonsterPursueThroughExit(monster, player, from, destinationRoom, exit))
                 continue;
 
             if (IsMonsterMovementSkipped(monster))
@@ -1316,7 +1316,11 @@ public partial class GameWorld
         if (room.NPC <= 0 || !Database.Monsters.TryGetValue(room.NPC, out var npcTemplate))
             return null;
 
-        if (roomMonsters.Any(m => m.IsPermanentNPC))
+        // The "present" latch is THIS room's primary being alive — here, or anywhere it chased a player
+        // off to (a locked Room.NPC follows its target out; see CanMonsterPursueThroughExit). A different
+        // room's primary that chased in does not count.
+        if (roomMonsters.Any(m => m.IsPermanentNPC && m.Template.Number == npcTemplate.Number)
+            || IsRoomPrimaryAliveAway(room, npcTemplate.Number))
             return null;
 
         // A primary NPC NEVER materialises in front of a player who is merely standing in the room.
@@ -1355,9 +1359,44 @@ public partial class GameWorld
         return _boundNpcRoomsByMonsterNumber.ContainsKey(template.Number);
     }
 
-    private bool CanMonsterPursueThroughExit(MonsterInstance monster, (int Map, int Room) from, Room destinationRoom, RoomExitDefinition exit)
+    private static bool IsAtHomeRoom(MonsterInstance monster)
+        => monster.MapNumber == monster.HomeMapNumber && monster.RoomNumber == monster.HomeRoomNumber;
+
+    // True when this room's primary NPC is alive in some OTHER room — it locked onto a player and chased
+    // them out. Stock's "primary present" latch is cleared only by the primary's death, so while it roams
+    // the room must not spawn a second one (a GameLimit-0 primary would otherwise double up). Caller holds
+    // _monsterLock.
+    private bool IsRoomPrimaryAliveAway(Room room, int npcNumber)
     {
-        if (monster.IsDead || monster.IsPermanentNPC)
+        foreach (var kvp in _roomMonsters)
+        {
+            if (kvp.Key.Map == room.MapNumber && kvp.Key.Room == room.RoomNumber)
+                continue;
+
+            var snapshot = kvp.Value;
+            for (int i = 0; i < snapshot.Count; i++)
+            {
+                var m = snapshot[i];
+                if (!m.IsDead && m.IsPermanentNPC && m.Template.Number == npcNumber
+                    && m.HomeMapNumber == room.MapNumber && m.HomeRoomNumber == room.RoomNumber)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    private bool CanMonsterPursueThroughExit(MonsterInstance monster, Player player, (int Map, int Room) from, Room destinationRoom, RoomExitDefinition exit)
+    {
+        if (monster.IsDead)
+            return false;
+
+        // A room's own NPC (the Room.NPC primary, or any template pinned to NPC rooms) stays home UNTIL it
+        // is locked onto the player who is leaving — then it chases like any other monster. Stock has no
+        // stay-home rule at all: its fast update moves every monster whose target-name slot is set,
+        // primaries included (the duergar lord follows an Outlaw he just swung at out of his office, as
+        // long as the door is open). Our pin still holds for ambient wander and a Leader's drag.
+        bool roomNpc = monster.IsPermanentNPC || IsRoomBoundMonster(monster.Template);
+        if (roomNpc && !monster.IsLockedOnTarget(player.Name))
             return false;
 
         if (monster.MapNumber != from.Map || monster.RoomNumber != from.Room)
@@ -1373,11 +1412,8 @@ public partial class GameWorld
         if (monster.Template.Type == 3)
             return false;
 
-        if (IsRoomBoundMonster(monster.Template))
-            return false;
-
-        return CanMonsterEnterRoomByMovement(monster.Template, destinationRoom, exit)
-            && CanMonsterTraverseExitType(monster.Template, exit);
+        return CanMonsterEnterRoomByMovement(monster.Template, destinationRoom, exit, ignoreRoomPin: roomNpc)
+            && CanMonsterTraverseExitType(monster.Template, exit, GetLiveDoorLockState(exit));
     }
 
     // ── The one mover ───────────────────────────────────────
@@ -1399,14 +1435,16 @@ public partial class GameWorld
     // Note there is NO "MonsterType > 0" guard in stock: a Group-0 monster may enter a Group-0 room.
     // That test is right for SPAWNING (IsUnboundMonsterCompatibleWithRoom, which keeps its own rule) but
     // was never the mover's.
-    private bool CanMonsterEnterRoomByMovement(Monster template, Room destinationRoom, RoomExitDefinition exit)
+    private bool CanMonsterEnterRoomByMovement(Monster template, Room destinationRoom, RoomExitDefinition exit, bool ignoreRoomPin = false)
     {
         if (IsSysopTestingRoom(destinationRoom.MapNumber, destinationRoom.RoomNumber))
             return true;
 
-        // Local design, no stock counterpart: an NPC pinned to a room list never leaves it. Reachable here
-        // only via a Leader's drag — an independent move is already refused by IsRoomBoundMonster.
-        if (_boundNpcRoomsByMonsterNumber.TryGetValue(template.Number, out var boundRooms))
+        // Local design, no stock counterpart: an NPC pinned to a room list never wanders or gets dragged
+        // out of it (ambient wander refuses it outright, so this is reached via a Leader's drag). The one
+        // exception is a chase: a pinned NPC LOCKED onto a fleeing player passes ignoreRoomPin and takes
+        // the stock destination rule below, because stock has no pin to begin with.
+        if (!ignoreRoomPin && _boundNpcRoomsByMonsterNumber.TryGetValue(template.Number, out var boundRooms))
             return boundRooms.Contains((destinationRoom.MapNumber, destinationRoom.RoomNumber));
 
         return IsMovementDestinationCompatible(template, destinationRoom, exit);
@@ -1434,8 +1472,16 @@ public partial class GameWorld
         return false;
     }
 
-    // The mover's exit-type switch.
+    // The mover's exit-type switch, on the exit's imported lock field.
     internal static bool CanMonsterTraverseExitType(Monster template, RoomExitDefinition exit)
+        => CanMonsterTraverseExitType(template, exit, exit.LockStateRaw);
+
+    // The same switch with the door/gate lock field as it stands NOW (see GetLiveDoorLockState). Stock
+    // reads that field live from the room record, where OPEN writes 0, CLOSE writes 1 and a lock or the
+    // relock timer writes 2; every imported door/gate row carries 2, its starting state. Testing only the
+    // import kept every monster but a guard shut out of a door a player had just opened — nothing ever
+    // chased or wandered through an open door. doorLockState is read for Door/Gate exits only.
+    internal static bool CanMonsterTraverseExitType(Monster template, RoomExitDefinition exit, int doorLockState)
     {
         int group = template.Group;
         switch (exit.ExitType)
@@ -1459,11 +1505,11 @@ public partial class GameWorld
             case RoomExitType.Key:
                 return exit.LockStateRaw == 0 || group == RoamingMonsterGroup;
 
-            // cases 7 / 11 — the same test on the Door/Gate lock field (Para1), with Guards
-            // exempt as well: a guard chases you through a door.
+            // cases 7 / 11 — the same test on the Door/Gate lock field, with Guards exempt as well: a
+            // guard chases you through a door. Here the field is live: an OPEN door passes anyone.
             case RoomExitType.Door:
             case RoomExitType.Gate:
-                return exit.LockStateRaw == 0 || group == GuardMonsterGroup || group == RoamingMonsterGroup;
+                return doorLockState == 0 || group == GuardMonsterGroup || group == RoamingMonsterGroup;
 
             // Everything else has no case and falls through to the move — Normal, Action, Trap, Text,
             // BlockGuard, Class/Race/Level/Alignment, Cast, Ability, SpellTrap. The class/race/level/
@@ -1472,6 +1518,19 @@ public partial class GameWorld
             default:
                 return true;
         }
+    }
+
+    // A door/gate's lock field as it stands now, in stock's encoding: 0 open, 1 closed, 2 locked. The
+    // runtime open/unlocked state (shared by both sides of the door) is the source of truth; any other
+    // exit type reports its imported field unchanged.
+    private int GetLiveDoorLockState(RoomExitDefinition exit)
+    {
+        if (exit.ExitType is not (RoomExitType.Door or RoomExitType.Gate))
+            return exit.LockStateRaw;
+
+        var state = GetExitState(exit);
+        RefreshTimedExitState(exit, state);
+        return state.Access.IsOpen ? 0 : state.Access.IsUnlocked ? 1 : 2;
     }
 
     // Random-direction pick: walk directions 0-9, keep only the exit types an

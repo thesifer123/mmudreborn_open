@@ -262,7 +262,7 @@ public sealed class CombatEngineMonsterDamageTests
     public void IsEligibleDepartingFreeAttacker_folds_type37_angel_into_engaged_only(int align, bool engaged, bool expected)
     {
         // roll 0 <= aggression 100, EvilPoints 0 — only the type override decides the outcome.
-        Assert.Equal(expected, CombatEngine.IsEligibleDepartingFreeAttacker(align, 100, engaged, 0, 0, monsterType: 37));
+        Assert.Equal(expected, CombatEngine.IsEligibleDepartingFreeAttacker(align, 100, engaged, 0, 0, monsterGroup: 37));
     }
 
     [Fact]

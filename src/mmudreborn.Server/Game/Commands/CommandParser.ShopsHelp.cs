@@ -1641,9 +1641,24 @@ public partial class CommandParser
                     continue; // monster can't see the sneaker
             }
 
-            // Check if this monster should aggro based on alignment
-            if (!CombatEngine.ShouldMonsterAggro(monster.Template, _player))
+            // A monster LOCKED onto this player (its target-name slot holds their name — set by the lock
+            // roll after it swings at them, or when they attack it) attacks them on sight with NO
+            // alignment test: the scan takes its bound branch before, and instead of, the alignment
+            // branches. That is how a duergar that took its departing swing at an Outlaw keeps coming.
+            // Only an unlocked monster is judged by alignment. (An owned pet's slot holds its OWNER, so
+            // a pet is never treated as locked on anyone here.) A locked monster with no attack at all —
+            // a practice dummy you struck — takes no swing (its attack loop finds only empty slots), so
+            // it is not queued; that is the same rule BREAK uses to release one.
+            if (monster.IsLockedOnTarget(_player.Name) && !monster.HasPlayerOwner)
+            {
+                if (!CombatEngine.CanMonsterRetaliate(monster.Template)
+                    || CombatEngine.PlayerHoldsMonsterPacifier(monster.Template, _player))
+                    continue;
+            }
+            else if (!CombatEngine.ShouldMonsterAggro(monster.Template, _player))
+            {
                 continue;
+            }
 
             QueueMonsterAggro(monster, activeAttackers, ref hadActiveAttackers);
         }
