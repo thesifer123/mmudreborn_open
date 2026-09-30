@@ -39,6 +39,11 @@ public class GameSession : IGameSession
 
             _client.Player = player;
             player.Client = _client;
+            // Stock keeps the energy pool on the player record, so a character comes back with the pool
+            // they left with — a full one for anyone who logged out idle. Ours is runtime-only, so start
+            // it full rather than empty until the first refill: an item or spell whose energy cost is a
+            // whole round (the nexus spear) works on entry instead of "You have already cast a spell".
+            player.RefillStaminaOutOfCombat();
             _world.AddPlayer(player);
 
             _world.BroadcastToRealm(

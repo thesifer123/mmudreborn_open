@@ -681,6 +681,8 @@ public partial class CommandParser
                 return false;
             }
 
+            if (itemSourced && !await TryPayItemCastCostAsync(spell, ItemCastResolver.PlayerTarget))
+                return false;
             ChargeOffensiveSpellCost(spell, itemSourced);
             // forceAnnounceEngaged: when we just emitted "*Combat Off*", the PvP re-engage must print the
             // balancing "*Combat Engaged*" (the paired toggle). The PvP path otherwise engages silently for
@@ -698,6 +700,8 @@ public partial class CommandParser
             return false;
         }
 
+        if (itemSourced && !await TryPayItemCastCostAsync(spell, ItemCastResolver.MonsterTarget))
+            return false;
         ChargeOffensiveSpellCost(spell, itemSourced);
         await ExecuteOffensiveSpellAgainstMonsterAsync(spell, targetMonster, keepAutoCombatSpellSelected, extraProjectileBudget);
         return true;
@@ -705,10 +709,8 @@ public partial class CommandParser
 
     // Charge the caster for an offensive cast. A typed `cast` spends mana + energy and consumes the
     // once-per-round cast token (SpendSpellCast). An item-sourced cast — the `use` command firing an
-    // item's ability-43 spell — costs the caster NOTHING: it's paid by the item's own charge. Item
-    // use routes ability 43 through the same cast resolver as CAST but never deducts
-    // mana/stamina, never adds an action delay, and never clears the cast-token bit — so an item
-    // cast is independent of the spell round entirely (you can use-cast and still cast/melee that round).
+    // item's ability-43 spell — has already paid its energy and mana in TryPayItemCastCostAsync, and
+    // never touches the cast token.
     private void ChargeOffensiveSpellCost(GameSpell spell, bool itemSourced)
     {
         if (itemSourced)
@@ -716,6 +718,42 @@ public partial class CommandParser
 
         _player.CurrentMana -= spell.ManaCost;
         SpendSpellCast(spell);
+    }
+
+    // Which cast resolver an item cast goes through — each checks the spell's level at a different point.
+    private enum ItemCastResolver { MonsterTarget, PlayerTarget, NoTarget }
+
+    // An item cast (USE / EAT / DRINK firing an item's ability-43 spell) goes through the same cast
+    // resolver as a typed cast, and the resolver's cost gate applies to it: the caster needs the spell's
+    // energy ("You have already cast a spell this round!") and mana, and pays both. What an item cast
+    // skips is the typed cast's once-per-round token and its success roll. So a 1000-energy item spell —
+    // the nexus spear, the attack wands — is once a round, and a mana-cost one needs the mana (bug #244).
+    // The spell's level is checked as well: first for a monster or player target, last for a no-target cast.
+    private async Task<bool> TryPayItemCastCostAsync(GameSpell spell, ItemCastResolver resolver)
+    {
+        bool usesKai = _world.Database.Classes.TryGetValue(_player.ClassId, out var cls) && Player.UsesKai(cls);
+        bool tooLowLevel = _player.Level < spell.ReqLevel;
+        string? refusal = null;
+        if (tooLowLevel && resolver == ItemCastResolver.MonsterTarget)
+            refusal = "You are not of a high enough level to cast that spell.";
+        else if (tooLowLevel && resolver == ItemCastResolver.PlayerTarget)
+            refusal = "This spell is too powerful for you to control.";
+        else if (_player.CurrentEnergy < spell.EnergyCost)
+            refusal = usesKai ? "You have already invoked a power this round!" : "You have already cast a spell this round!";
+        else if (_player.CurrentMana < spell.ManaCost)
+            refusal = InsufficientMagicResourceMessage();
+        else if (tooLowLevel)
+            refusal = "This spell is too powerful for you to control.";
+
+        if (refusal != null)
+        {
+            await _client.SendLineAsync(refusal);
+            return false;
+        }
+
+        _player.CurrentEnergy -= spell.EnergyCost;
+        _player.CurrentMana -= spell.ManaCost;
+        return true;
     }
 
     private async Task<bool> TryBeginOrRefreshMonsterCombatSpellAsync(GameSpell spell, string target, bool reportMissingTarget)

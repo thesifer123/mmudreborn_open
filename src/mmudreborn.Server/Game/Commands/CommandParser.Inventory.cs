@@ -1442,9 +1442,10 @@ public partial class CommandParser
             _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber,
                 $"{_player.Name} {verbRoom} {item.Name}.", _client);
 
-        if (item.UseSpellId > 0 && _world.Database.Spells.TryGetValue(item.UseSpellId, out var spell))
+        // A cast the resolver's cost gate refuses keeps the charge, as stock's EAT/DRINK does.
+        if (item.UseSpellId > 0 && _world.Database.Spells.TryGetValue(item.UseSpellId, out var spell)
+            && await ApplyItemUseSpellEffectAsync(spell))
         {
-            await ApplyItemUseSpellEffectAsync(spell);
             await ConsumeCarriedItemChargeAsync(match);
         }
 

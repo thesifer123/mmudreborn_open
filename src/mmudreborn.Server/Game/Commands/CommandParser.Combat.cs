@@ -1602,9 +1602,10 @@ public partial class CommandParser
 
         // USE clears the rest and meditate flags when it acts — but
         // NOT the sneak bit: using an item does NOT break sneak/hide (unlike casting,
-        // which clears it). There is also NO in-combat block
-        // and NO once-per-round cast-token gate on USE — so an item cast stays hidden, works mid-fight,
-        // and is independent of the spell round. This is exactly what makes the off-guard strike potent.
+        // which clears it). There is also NO in-combat block and NO once-per-round cast token on USE,
+        // so an item cast stays hidden and works mid-fight. It is NOT free, though: the cast resolver's
+        // cost gate charges the spell's energy and mana (TryPayItemCastCostAsync), so a full-round
+        // (1000-energy) item spell like the nexus spear is once a round (bug #244).
         _player.IsResting = false;
         _player.IsMeditating = false;
 
@@ -1613,10 +1614,10 @@ public partial class CommandParser
             // An item's
             // ability-43 offensive spell resolves through the SAME pipeline as a typed `cast` — identical
             // target resolution, hostility gates, hit/resist/damage formulas, messages, and death handling.
-            // The only differences are it's paid by the item charge (no mana/energy) and it's a one-shot,
-            // so it never becomes the repeating per-round combat action (keepAutoCombatSpellSelected:false)
-            // and resolves immediately. The instant off-guard strike is faithful — the cast
-            // applies spell damage inline with no action delay or round gate, same as the cast command.
+            // The differences: it pays the spell's energy and mana but never the cast token, and it's a
+            // one-shot, so it never becomes the repeating per-round combat action
+            // (keepAutoCombatSpellSelected:false) and resolves immediately. The instant off-guard strike
+            // is faithful — the cast applies spell damage inline with no action delay.
             bool hit = await HandleOffensiveSpellCastAsync(
                 spell,
                 targetArg,
@@ -1625,13 +1626,15 @@ public partial class CommandParser
                 reportMissingTarget: true,
                 itemSourced: true);
 
-            // Missing/invalid target or a blocked hostility gate already reported — don't burn a charge.
+            // Missing/invalid target, a blocked hostility gate or the cost gate already reported — don't
+            // burn a charge.
             if (!hit)
                 return true;
         }
-        else
+        else if (!await ApplyItemUseSpellEffectAsync(spell, targetArg))
         {
-            await ApplyItemUseSpellEffectAsync(spell, targetArg);
+            // No target, or the cost gate refused it — already reported; the item keeps its charge.
+            return true;
         }
 
         await ConsumeCarriedItemChargeAsync(carried);
@@ -1643,10 +1646,12 @@ public partial class CommandParser
         return true;
     }
 
-    // Fire a manual item-use spell (item ability 43): a beneficial duration spell applies directly
-    // (no mana cost), anything else routes through the triggered-spell pipeline. Consumes the
-    // once-per-round cast token like a regular cast. Shared by `use` and `eat`/`drink`.
-    private async Task ApplyItemUseSpellEffectAsync(GameSpell spell, string targetArg = "")
+    // Fire a manual item-use spell (item ability 43): a beneficial duration spell applies directly,
+    // anything else routes through the triggered-spell pipeline. The cast resolver's cost gate applies
+    // (the spell's level, energy and mana — TryPayItemCastCostAsync) but an item cast never touches the
+    // typed cast's once-per-round token. Returns false when nothing was cast (no target, or the gate
+    // refused it), so the caller keeps the item's charge. Shared by `use` and `eat`/`drink`.
+    private async Task<bool> ApplyItemUseSpellEffectAsync(GameSpell spell, string targetArg = "", bool payCost = true)
     {
         // Who the effect lands on. USE parses "<item> [target]" and a player-targeted
         // use routes through the SAME targeting a typed `cast` gets —
@@ -1658,8 +1663,13 @@ public partial class CommandParser
         if (!TryResolveBeneficialSpellTarget(targetArg, out var effectTarget))
         {
             await _client.SendLineAsync("Cast on whom?");
-            return;
+            return false;
         }
+
+        // A carrier's rolled sub-spell (below) rides on the carrier's payment.
+        if (payCost && !await TryPayItemCastCostAsync(spell,
+                string.IsNullOrWhiteSpace(targetArg) ? ItemCastResolver.NoTarget : ItemCastResolver.PlayerTarget))
+            return false;
 
         // A "cast on ending" carrier (ability 151, no harm) used as a self/utility item — e.g. quaffing a
         // rainbow potion (#1665 → #1161): roll one spell from its MinBase..MaxBase POOL and apply THAT
@@ -1667,21 +1677,16 @@ public partial class CommandParser
         // (Inflict-Damage + Alter-AV, Dur 10) as a lingering self-DoT, #1163 (Confusion + Slowness,
         // Dur 30) as a lingering debuff, #1164 (Heal + Heal-Mana, Dur 0) as an instant heal — instead of
         // the pool id (1162-1164) falling through as a raw ~1163 damage number. Depth-guarded like the
-        // offensive carrier gate. The cast-round token is set by the recursive call (or here when nothing
-        // valid rolled).
+        // offensive carrier gate.
         if (TryResolveCarrierSpell(spell, out var carrierSub))
         {
             if (carrierSub != null && _chainDepth < MaxChainDepth)
             {
                 _chainDepth++;
-                try { await ApplyItemUseSpellEffectAsync(carrierSub, targetArg); }
+                try { await ApplyItemUseSpellEffectAsync(carrierSub, targetArg, payCost: false); }
                 finally { _chainDepth--; }
             }
-            else
-            {
-                _player.NextSpellAllowedAtUtc = _world.GetNextCombatPulseUtc();
-            }
-            return;
+            return true;
         }
 
         // A SELF-targeted duration-harm spell (harm ability 1/8 + Duration > 0) applied to the drinker is a
@@ -1705,8 +1710,7 @@ public partial class CommandParser
             if (ongoing != null)
                 await _client.SendLineAsync(GameAnsi.SpellHostile(ongoing));
 
-            _player.NextSpellAllowedAtUtc = _world.GetNextCombatPulseUtc();
-            return;
+            return true;
         }
 
         // A non-offensive spell that carries a duration buff OR an immediate beneficial effect (heal,
@@ -1729,8 +1733,7 @@ public partial class CommandParser
                 TriggeredCastAnnounce.CastSuccess);
         }
 
-        // Item use consumes the cast-round token (same delay as regular spells).
-        _player.NextSpellAllowedAtUtc = _world.GetNextCombatPulseUtc();
+        return true;
     }
 
     // The uses left in the player's own item slot (the item lookup reads the per-slot
