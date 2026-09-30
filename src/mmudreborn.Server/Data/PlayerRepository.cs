@@ -147,7 +147,7 @@ public class PlayerRepository : IPlayerRepository
              SuicidePassword, KeepMode, DisconnectedWhilePlaying,
              QuestAbilities,
              BankBalances,
-             ActiveSpells, DeathLog, PoisonLevel, TesterSysop, LastCleanupUtc,
+             ActiveSpells, DeathLog, PoisonLevel, TesterSysop, LastCleanupUtc, GangHouseFlags,
              Inventory, Equipment)
             VALUES
             (@name, @pass, @race, @class, @level, @exp,
@@ -165,7 +165,7 @@ public class PlayerRepository : IPlayerRepository
              @suicidepassword, @keepmode, @disconnectedwhileplaying,
              @questabilities,
              @bankbalances,
-             @activespells, @deathlog, @poisonlevel, @testersysop, @lastcleanuputc,
+             @activespells, @deathlog, @poisonlevel, @testersysop, @lastcleanuputc, @ganghouseflags,
              @inv, @equip)
             ON CONFLICT (Name) DO UPDATE SET
              Name = EXCLUDED.Name,
@@ -252,6 +252,7 @@ public class PlayerRepository : IPlayerRepository
              DeathLog = EXCLUDED.DeathLog,
              PoisonLevel = EXCLUDED.PoisonLevel,
              LastCleanupUtc = EXCLUDED.LastCleanupUtc,
+             GangHouseFlags = EXCLUDED.GangHouseFlags,
              Inventory = EXCLUDED.Inventory,
              Equipment = EXCLUDED.Equipment";
 
@@ -412,6 +413,7 @@ public class PlayerRepository : IPlayerRepository
             P("@lastcleanuputc", player.LastCleanupAppliedUtc == DateTime.MinValue
                 ? ""
                 : player.LastCleanupAppliedUtc.ToString("o", CultureInfo.InvariantCulture)),
+            P("@ganghouseflags", player.GangHouseFlags),
             P("@inv", JsonSerializer.Serialize(player.Inventory)),
             P("@equip", JsonSerializer.Serialize(player.Equipment)),
         };
@@ -842,6 +844,10 @@ public class PlayerRepository : IPlayerRepository
             lastCleanup, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var parsedLastCleanup)
             ? parsedLastCleanup
             : DateTime.MinValue;
+
+        player.GangHouseFlags = reader.IsDBNull(reader.GetOrdinal("GangHouseFlags"))
+            ? 0
+            : reader.GetInt32(reader.GetOrdinal("GangHouseFlags"));
 
         var inv = reader.GetString(reader.GetOrdinal("Inventory"));
         player.Inventory = JsonSerializer.Deserialize<List<int>>(inv) ?? [];
@@ -1473,7 +1479,7 @@ public class PlayerRepository : IPlayerRepository
     {
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT ShopId, MarkupPercent, Slots FROM GangShops ORDER BY ShopId";
+        cmd.CommandText = "SELECT ShopId, MarkupPercent, Slots, Account FROM GangShops ORDER BY ShopId";
 
         var rows = new List<mmudreborn.Data.Models.GangShopRecord>();
         using var reader = cmd.ExecuteReader();
@@ -1484,6 +1490,7 @@ public class PlayerRepository : IPlayerRepository
                 ShopId = reader.GetInt32(reader.GetOrdinal("ShopId")),
                 MarkupPercent = reader.GetInt32(reader.GetOrdinal("MarkupPercent")),
                 Slots = reader.GetString(reader.GetOrdinal("Slots")),
+                Account = reader.GetString(reader.GetOrdinal("Account")),
             });
         }
 
@@ -1495,14 +1502,16 @@ public class PlayerRepository : IPlayerRepository
         using var conn = OpenConnection();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
-            INSERT INTO GangShops (ShopId, MarkupPercent, Slots)
-            VALUES (@id, @markup, @slots)
+            INSERT INTO GangShops (ShopId, MarkupPercent, Slots, Account)
+            VALUES (@id, @markup, @slots, @account)
             ON CONFLICT(ShopId) DO UPDATE SET
                 MarkupPercent = EXCLUDED.MarkupPercent,
-                Slots = EXCLUDED.Slots";
+                Slots = EXCLUDED.Slots,
+                Account = EXCLUDED.Account";
         cmd.Parameters.AddWithValue("@id", shop.ShopId);
         cmd.Parameters.AddWithValue("@markup", shop.MarkupPercent);
         cmd.Parameters.AddWithValue("@slots", shop.Slots ?? "");
+        cmd.Parameters.AddWithValue("@account", shop.Account ?? "");
         cmd.ExecuteNonQuery();
     }
 

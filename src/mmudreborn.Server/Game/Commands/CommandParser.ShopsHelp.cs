@@ -353,17 +353,19 @@ public partial class CommandParser
             return;
         }
 
-        // Deed shop (type 12): buying a gang-house deed is gated like the stock buy path —
-        // gang leaders only, one house per gang, and the target house must be unowned.
+        // Deed shop (type 12): buying a gang-house deed is gated like the stock buy path — gang leaders
+        // only, not while carrying a deed, the gang's experience, and the paper-work lockout. A house
+        // somebody owns is simply out of stock: its one deed is in their pack.
         int deedHouseId = shop.ShopType == GameWorld.DeedShopType
             ? buyItem.Abilities.GetValueOrDefault(GameWorld.GangHouseDeedAbilityId)
             : 0;
         if (deedHouseId > 0)
         {
-            string? refusal = ValidateDeedPurchase(deedHouseId);
+            string? refusal = ValidateDeedPurchase();
             if (refusal != null)
             {
-                await _client.SendLineAsync(refusal);
+                foreach (var line in refusal.Split('\n'))
+                    await _client.SendLineAsync(line);
                 return;
             }
         }
@@ -442,19 +444,18 @@ public partial class CommandParser
         if (buyStopMessage != null)
             await _client.SendLineAsync(buyStopMessage);
 
+        // Note the new owner (the deed in inventory drives the in-house scripts); stock prints nothing
+        // beyond the ordinary "You just bought" line.
         if (deedHouseId > 0 && boughtCount > 0)
-        {
-            // Record gang ownership of the house (the deed in inventory drives the in-house scripts).
             _world.AssignGangHouse(deedHouseId, _player.Gang, _player.Name, DateTime.UtcNow);
-            await _client.SendLineAsync(
-                $"{MudAnsi.BrightGreen}Your gang now owns the {GameWorld.GangHouseColorName(deedHouseId)} Gang House! " +
-                $"USE the deed to receive your keys and emblem.{MudAnsi.Reset}");
-        }
     }
 
-    /// <summary>Gate a gang-house deed purchase (shop type 12). Returns a refusal
-    /// message, or null when the purchase is allowed.</summary>
-    private string? ValidateDeedPurchase(int houseId)
+    /// <summary>Gate a gang-house deed purchase (shop type 12), in stock's precedence: not the gang
+    /// leader beats everything, the paper-work lockout (sold a deed since the last cleanup) beats the rest,
+    /// then carrying a deed, then the gang's experience. Returns a refusal (lines split on '\n'), or null.
+    /// Stock answers a leader who already carries a deed with the experience line — its own "already the
+    /// owner" string is unreachable — so we print the string it meant.</summary>
+    private string? ValidateDeedPurchase()
     {
         if (string.IsNullOrWhiteSpace(_player.Gang) ||
             !_world.PlayerRepo.IsGangLeader(_player.Name, _player.Gang))
@@ -462,24 +463,20 @@ public partial class CommandParser
             return "You must be a gang leader to purchase a gang house deed.";
         }
 
-        if (_world.GangHouseMinimumExperience > 0 && _player.Experience < _world.GangHouseMinimumExperience)
+        if ((_player.GangHouseFlags & Player.GangHouseDeedSoldFlag) != 0)
         {
-            return $"You are not experienced enough to own a gang house! Required experience: {_world.GangHouseMinimumExperience}";
+            return "Due to outstanding paper-work we are unable to provide you with another\nproperty today. Please call back tomorrow!";
         }
 
-        if (_world.IsGangHouseLockedOut(_player.Gang))
-        {
-            return "Due to outstanding paper-work we are unable to provide you with another gang house deed at this time.";
-        }
-
-        if (_world.GetGangOwnedHouseId(_player.Gang) > 0)
+        if (_player.Inventory.Any(itemId => _world.GetDeedHouseId(itemId) > 0))
         {
             return "You are already the owner of a gang house.";
         }
 
-        if (_world.IsGangHouseOwned(houseId))
+        if (_world.GangHouseMinimumExperience > 0
+            && _world.GetGangExperience(_player.Gang) < _world.GangHouseMinimumExperience)
         {
-            return $"The {GameWorld.GangHouseColorName(houseId)} Gang House is already owned by another gang.";
+            return "Your gang does not have enough experience for you to purchase a gang house now.";
         }
 
         return null;
@@ -518,6 +515,17 @@ public partial class CommandParser
             }
 
             long sellPriceCopper = GetSellPriceCopper(item);
+            // Selling to the deed shop while its slot for the item is below max arms the "outstanding
+            // paper-work" lockout until the next cleanup; the deed goes back on the shelf only then. (Stock
+            // arms it on APPRAISE too — a plain bug we deliberately don't reproduce.)
+            var sellRoom = _world.GetRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber);
+            if (sellRoom != null
+                && _world.Database.Shops.TryGetValue(sellRoom.Shop, out var sellShop)
+                && sellShop.ShopType == GameWorld.DeedShopType
+                && sellShop.Items.Any(slot => slot.ItemId == item.Number && slot.Current < slot.Max))
+            {
+                _player.GangHouseFlags |= Player.GangHouseDeedSoldFlag;
+            }
             TryRemoveResolvedCarriedItem(saleMatch, out _);
             _world.RemoveItemRuntimeState(saleMatch.InstanceId);
             CurrencyHelper.SetFromCopper(_player, CurrencyHelper.ToCopper(_player) + sellPriceCopper);

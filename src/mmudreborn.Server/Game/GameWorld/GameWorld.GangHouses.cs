@@ -6,13 +6,14 @@ using mmudreborn.Game;
 
 namespace mmudreborn.Server;
 
-// Gang-house ownership engine: the deed-pool, nightly tax, and eviction stock runs in
-// its nightly maintenance. Each of the ten houses (HouseId 1..10) can be owned by one gang at a time.
-// Buying a deed from the Realm Deed Shop (ShopType 12) grants ownership; the deed itself drives the
-// in-house command scripts (summon guard / make emblem / make key) via the existing textblock engine.
-// Each night the owning gang's leader is taxed (deed ability 182, in gold); a leader who can't pay is
-// evicted — ownership cleared, deed returned to the pool, gang-house-tagged items swept. A house whose
-// deed no gang member carries any more (sold back to the deed shop, say) is closed the same way.
+// Gang-house ownership engine: the deed pool, nightly ownership, tax and eviction the stock cleanup
+// runs. Stock stores no owner. Each night a house is owned exactly when a player in a
+// gang carries its deed (ability 181); that carrier pays the tax (deed ability 182, in gold) from their
+// bankbook, and the owning gang is the carrier's gang. A house nobody carries the deed to, or whose
+// carrier can't pay, is closed: its ability-183 items leave every player, anyone saved inside is moved
+// out, its floors and gang shops are emptied and the deed goes back on the Realm Deed Shop shelf. An owned
+// house's items leave anyone outside the owning gang. The deed itself drives the in-house command scripts
+// (summon guard / make emblem / make key) via the existing textblock engine.
 public partial class GameWorld
 {
     public const int GangHouseDeedAbilityId = 181;   // value = house id 1..10
@@ -28,10 +29,14 @@ public partial class GameWorld
     // Owned houses only (houseId -> record). Absence ⇒ unowned/available.
     private readonly Dictionary<int, GangHouseRecord> _gangHouses = new();
 
-    // Gangs evicted for non-payment can't buy another deed until the next daily cleanup clears the
-    // lockout (the stock "outstanding paper-work" flag). Persisted as a CSV server setting.
+    // Legacy: the re-buy lockout used to be a per-gang CSV armed on eviction. Stock keeps it per player,
+    // armed by selling a deed (Player.GangHouseDeedSoldFlag), so the old setting is only ever cleared.
     private const string GangHouseLockoutSettingKey = "GangHouseEvictionLockouts";
-    private readonly HashSet<string> _gangHouseLockouts = new(StringComparer.OrdinalIgnoreCase);
+
+    // The nightly bank read lands on the carrier's first bankbook at or above this one (Bank of Godfrey).
+    private const int GangHouseTaxBankNumber = 8;
+
+    private readonly record struct GangHouseOwner(Player Carrier, string Gang);
 
     public static string GangHouseColorName(int houseId)
         => houseId >= 1 && houseId <= 10 ? GangHouseColorNames[houseId] : "Gang";
@@ -46,30 +51,15 @@ public partial class GameWorld
                 if (rec.HouseId is >= 1 and <= 10)
                     _gangHouses[rec.HouseId] = rec;
             }
-
-            _gangHouseLockouts.Clear();
-            foreach (var gang in PlayerRepo.GetServerSettingText(GangHouseLockoutSettingKey, "")
-                         .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            {
-                _gangHouseLockouts.Add(gang);
-            }
         }
+
+        if (PlayerRepo.GetServerSettingText(GangHouseLockoutSettingKey, "").Length > 0)
+            PlayerRepo.SetServerSettingText(GangHouseLockoutSettingKey, string.Empty);
 
         // Faithful deed pool: a deed for an owned house is OUT of the shop until the house is lost.
         foreach (var houseId in GetOwnedHouseIds())
             SetGangHouseDeedInStock(houseId, false);
     }
-
-    public bool IsGangHouseLockedOut(string gang)
-    {
-        if (string.IsNullOrWhiteSpace(gang))
-            return false;
-        lock (_gangHouseLock)
-            return _gangHouseLockouts.Contains(gang);
-    }
-
-    private void PersistGangHouseLockouts()
-        => PlayerRepo.SetServerSettingText(GangHouseLockoutSettingKey, string.Join(",", _gangHouseLockouts));
 
     private List<int> GetOwnedHouseIds()
     {
@@ -81,22 +71,6 @@ public partial class GameWorld
     {
         lock (_gangHouseLock)
             return _gangHouses.TryGetValue(houseId, out var rec) ? rec : null;
-    }
-
-    /// <summary>The house id this gang owns (1..10), or 0 if none.</summary>
-    public int GetGangOwnedHouseId(string gang)
-    {
-        if (string.IsNullOrWhiteSpace(gang))
-            return 0;
-        lock (_gangHouseLock)
-        {
-            foreach (var (id, rec) in _gangHouses)
-            {
-                if (string.Equals(rec.OwnerGang, gang, StringComparison.OrdinalIgnoreCase))
-                    return id;
-            }
-        }
-        return 0;
     }
 
     public bool IsGangHouseOwned(int houseId) => GetGangHouse(houseId) != null;
@@ -156,177 +130,270 @@ public partial class GameWorld
         }
     }
 
-    // ---- Nightly tax + eviction (called from RunDailyCleanup) ------------------------------------
+    /// <summary>A gang's experience: what its members have earned while in it (the deed-purchase gate).
+    /// Online members count their live total.</summary>
+    public long GetGangExperience(string gang)
+    {
+        long total = 0;
+        foreach (var (name, _) in PlayerRepo.GetPlayersByGang(gang))
+        {
+            var member = _onlinePlayers.TryGetValue(name, out var online) ? online : PlayerRepo.LoadPlayerByName(name);
+            if (member != null)
+                total += member.GangExperience;
+        }
+        return total;
+    }
+
+    // ---- Nightly cleanup: ownership, tax, sweep (called from RunDailyCleanup) ---------------------
 
     public void ProcessGangHouseTax(DateTime now)
     {
-        // The "outstanding paper-work" lockout clears each cleanup; tonight's evictions re-arm it.
-        lock (_gangHouseLock)
+        // Every character: the live object for anyone online, the stored record for everyone else.
+        var online = GetAllOnlinePlayers();
+        var onlineNames = new HashSet<string>(online.Select(p => p.Name), StringComparer.OrdinalIgnoreCase);
+        var offline = new List<Player>();
+        foreach (var name in PlayerRepo.GetAllPlayerNames())
         {
-            _gangHouseLockouts.Clear();
-            PersistGangHouseLockouts();
+            if (onlineNames.Contains(name))
+                continue;
+            var stored = PlayerRepo.LoadPlayerByName(name);
+            if (stored != null)
+                offline.Add(stored);
         }
 
-        List<GangHouseRecord> owned;
-        lock (_gangHouseLock)
-            owned = _gangHouses.Values.ToList();
-
-        var heldHouseIds = owned.Count > 0 ? FindHeldGangHouseDeeds() : new HashSet<int>();
-
-        var evictedHouseIds = new HashSet<int>();
-        foreach (var house in owned)
+        // 1. Ownership. A house is owned tonight exactly when a player in a gang carries its deed in their
+        //    pack; the carrier is the owner and their gang the owning gang. Stock overwrites on every find,
+        //    so the last carrier walked wins.
+        var owners = new Dictionary<int, GangHouseOwner>();
+        foreach (var player in online.Concat(offline))
         {
-            int taxGold = GetHouseTaxGold(house.HouseId);
-            long taxCopper = (long)taxGold * 100;            // tax = the ability value * 100 copper
-            string colour = GangHouseColorName(house.HouseId);
-
-            // Nobody carries the deed any more, so the house is no longer owned: stock re-derives
-            // ownership from the deed each cleanup and never taxes a house without one. It closes
-            // silently and arms no re-buy lockout — the gang gave the deed up, it didn't default.
-            if (!heldHouseIds.Contains(house.HouseId))
-            {
-                Console.WriteLine($"GangHouse {house.HouseId} ({colour}): no gang member carries the deed — closing.");
-                EvictGangHouse(house, unpaidTax: false);
-                evictedHouseIds.Add(house.HouseId);
+            if (string.IsNullOrWhiteSpace(player.Gang))
                 continue;
-            }
-
-            string leaderName = PlayerRepo.GetGangLeaderName(house.OwnerGang) ?? house.OwnerPlayer;
-            bool online = _onlinePlayers.TryGetValue(leaderName, out var leader);
-            leader ??= PlayerRepo.LoadPlayerByName(leaderName);
-
-            if (leader != null && TryChargeGangHouseTax(leader, taxCopper))
+            foreach (var itemId in player.Inventory)
             {
-                house.LastTaxAt = now.ToString("o");
-                PlayerRepo.SaveGangHouse(house);
-                if (!online)
-                    PlayerRepo.SavePlayer(leader);            // persist the offline leader's debit
-                SendToPlayer(leaderName,
-                    $"{MudAnsi.BrightYellow}Your gang paid the {taxGold} gold nightly tax on the {colour} Gang House.{MudAnsi.Reset}");
-                Console.WriteLine($"GangHouse {house.HouseId} ({colour}): {house.OwnerGang} paid {taxGold}g tax.");
+                int houseId = GetDeedHouseId(itemId);
+                if (houseId is >= 1 and <= 10)
+                    owners[houseId] = new GangHouseOwner(player, player.Gang);
+            }
+        }
+
+        // 2. Tax, from the carrier's bankbook. A carrier who can't pay loses the house tonight.
+        var changedOffline = new HashSet<Player>(ReferenceEqualityComparer.Instance);
+        var unpaid = new HashSet<int>();
+        foreach (var (houseId, owner) in owners.OrderBy(kv => kv.Key))
+        {
+            int taxGold = GetHouseTaxGold(houseId);
+            string colour = GangHouseColorName(houseId);
+            if (TryChargeGangHouseTax(owner.Carrier, (long)taxGold * 100))
+            {
+                if (!onlineNames.Contains(owner.Carrier.Name))
+                    changedOffline.Add(owner.Carrier);
+                Console.WriteLine($"GangHouse {houseId} ({colour}): {owner.Carrier.Name} of {owner.Gang} paid {taxGold}g tax.");
             }
             else
             {
-                Console.WriteLine($"GangHouse {house.HouseId} ({colour}): {house.OwnerGang} could not pay {taxGold}g tax — evicting.");
-                EvictGangHouse(house, unpaidTax: true);
-                evictedHouseIds.Add(house.HouseId);
+                unpaid.Add(houseId);
+                Console.WriteLine($"GangHouse {houseId} ({colour}): {owner.Carrier.Name} of {owner.Gang} could not pay {taxGold}g tax — evicting.");
             }
         }
 
-        // One global pass over OFFLINE players removes every evicted house's keys/emblems/keyrings —
-        // they're shared per-house and emblems can be given to anyone, so a stale holder must not keep
-        // working keys or guard safe-passage against the next owner (online players swept in EvictGangHouse).
-        if (evictedHouseIds.Count > 0)
-            SweepGangHouseItemsFromOfflinePlayers(evictedHouseIds);
-    }
+        bool IsClosed(int houseId) => !owners.ContainsKey(houseId) || unpaid.Contains(houseId);
 
-    /// <summary>Debit the tax from the gang leader's bank holdings (largest balance first), mirroring
-    /// stock drawing house tax from the gang leader's bankbook. Returns false (⇒ eviction) if the
-    /// leader's total banked copper can't cover it.</summary>
-    internal static bool TryChargeGangHouseTax(Player leader, long taxCopper)
-    {
-        if (taxCopper <= 0)
-            return true;
-        long banked = leader.BankBalances.Values.Sum();
-        if (banked < taxCopper)
-            return false;
-
-        long remaining = taxCopper;
-        foreach (var bankNumber in leader.BankBalances.Keys.OrderByDescending(k => leader.BankBalances[k]).ToList())
+        // 3. Every character: the paper-work lockout ends, house items go, anyone saved inside a closed
+        //    house is moved out. Stock runs this only for characters with play time since the last cleanup,
+        //    so an idle player kept stale keys for days; we deliberately run it for everyone.
+        foreach (var player in online.Concat(offline))
         {
-            if (remaining <= 0)
-                break;
-            long take = Math.Min(remaining, leader.BankBalances[bankNumber]);
-            leader.BankBalances[bankNumber] -= take;
-            remaining -= take;
+            bool isOnline = onlineNames.Contains(player.Name);
+            if (ApplyNightlyGangHouseRules(player, owners, IsClosed, isOnline) && !isOnline)
+                changedOffline.Add(player);
         }
-        return true;
-    }
+        foreach (var player in changedOffline)
+            PlayerRepo.SavePlayer(player);
 
-    // unpaidTax=false closes a house nobody holds the deed to: the same teardown, minus the re-buy
-    // lockout and the "failed to pay the tax" notice.
-    private void EvictGangHouse(GangHouseRecord house, bool unpaidTax)
-    {
-        lock (_gangHouseLock)
+        // 4. Houses: a closed house loses its record, its gang shops and its deed goes back on sale; an
+        //    owned one's record follows tonight's carrier. Then the house floors.
+        for (int houseId = 1; houseId <= 10; houseId++)
         {
-            _gangHouses.Remove(house.HouseId);
-            if (unpaidTax)
+            if (IsClosed(houseId))
             {
-                _gangHouseLockouts.Add(house.OwnerGang);    // can't re-buy until next cleanup clears it
-                PersistGangHouseLockouts();
+                bool hadRecord;
+                lock (_gangHouseLock)
+                    hadRecord = _gangHouses.Remove(houseId);
+                if (hadRecord)
+                    PlayerRepo.DeleteGangHouse(houseId);
+                SetGangHouseDeedInStock(houseId, true);
+                ClearGangShopsForHouse(houseId);
+                continue;
             }
-        }
-        PlayerRepo.DeleteGangHouse(house.HouseId);
-        SetGangHouseDeedInStock(house.HouseId, true);        // deed returns to the pool
-        ClearGangShopsForHouse(house.HouseId);               // the gang's stocked shops empty out
 
-        // Sweep online holders immediately (so their live state can't access the house this session).
-        foreach (var player in GetAllOnlinePlayers())
+            var owner = owners[houseId];
+            GangHouseRecord rec;
+            lock (_gangHouseLock)
+            {
+                bool sameGang = _gangHouses.TryGetValue(houseId, out var existing)
+                    && string.Equals(existing.OwnerGang, owner.Gang, StringComparison.OrdinalIgnoreCase);
+                rec = new GangHouseRecord
+                {
+                    HouseId = houseId,
+                    OwnerGang = owner.Gang,
+                    OwnerPlayer = owner.Carrier.Name,
+                    PurchasedAt = sameGang ? existing!.PurchasedAt : now.ToString("o"),
+                    LastTaxAt = now.ToString("o"),
+                };
+                _gangHouses[houseId] = rec;
+            }
+            PlayerRepo.SaveGangHouse(rec);
+        }
+
+        if (ClearGangHouseFloors(IsClosed))
+            PersistRoomGroundState();
+    }
+
+    /// <summary>One character's share of the nightly cleanup. Returns true when anything changed.
+    /// Items tagged (ability 183) to a closed house are removed from everyone; items of an owned house
+    /// from anyone outside its owning gang. Losing an unpaid house's items leaves its carrier "Your
+    /// ganghouse has been closed down!!" and its gang "Gang house items have dissappeared..." — shown
+    /// now to an online player, at next login otherwise. A house nobody carried has no owner to notify.</summary>
+    private bool ApplyNightlyGangHouseRules(Player player, Dictionary<int, GangHouseOwner> owners,
+        Func<int, bool> isClosed, bool isOnline)
+    {
+        bool changed = false;
+
+        // The paper-work lockout from selling a deed lasts until this cleanup.
+        if ((player.GangHouseFlags & Player.GangHouseDeedSoldFlag) != 0)
         {
-            if (RemoveGangHouseTaggedItems(player, h => h == house.HouseId))
+            player.GangHouseFlags &= ~Player.GangHouseDeedSoldFlag;
+            changed = true;
+        }
+
+        int notices = 0;
+        foreach (int houseId in GetCarriedGangHouseTags(player))
+        {
+            if (!isClosed(houseId) || !owners.TryGetValue(houseId, out var owner))
+                continue;
+            if (string.Equals(owner.Carrier.Name, player.Name, StringComparison.OrdinalIgnoreCase))
+                notices |= Player.GangHouseClosedNoticeFlag;
+            if (string.Equals(owner.Gang, player.Gang, StringComparison.OrdinalIgnoreCase))
+                notices |= Player.GangHouseItemsGoneNoticeFlag;
+        }
+
+        bool removed = RemoveGangHouseTaggedItems(player, houseId =>
+            isClosed(houseId)
+            || !string.Equals(player.Gang, owners[houseId].Gang, StringComparison.OrdinalIgnoreCase));
+        if (removed)
+        {
+            changed = true;
+            if (isOnline)
                 RecalculatePlayerStats(player);              // a worn emblem's bonus must drop too
         }
 
-        if (!unpaidTax)
-            return;
-
-        string colour = GangHouseColorName(house.HouseId);
-        foreach (var player in GetAllOnlinePlayers())
+        if (notices != 0)
         {
-            if (string.Equals(player.Gang, house.OwnerGang, StringComparison.OrdinalIgnoreCase))
-                SendToPlayer(player.Name,
-                    $"{MudAnsi.BrightRed}Your gang failed to pay the tax — the {colour} Gang House has been closed down!{MudAnsi.Reset}");
+            changed = true;
+            if (isOnline)
+            {
+                if ((notices & Player.GangHouseClosedNoticeFlag) != 0)
+                    SendToPlayer(player.Name, GangHouseClosedNotice);
+                if ((notices & Player.GangHouseItemsGoneNoticeFlag) != 0)
+                    SendToPlayer(player.Name, GangHouseItemsGoneNotice);
+            }
+            else
+            {
+                player.GangHouseFlags |= notices;
+            }
         }
+
+        // Anyone saved inside a closed house is put out: the Temple, or the Earthen Tomb from 40 evil
+        // points up — the same rooms (and cut) a death respawns to.
+        var room = GetRoom(player.CurrentMapNumber, player.CurrentRoomNumber);
+        if (room != null && room.IsGangHouse && room.GangHouseId is >= 1 and <= 10 && isClosed(room.GangHouseId))
+        {
+            player.CurrentMapNumber = DefaultDeathRespawnMapNumber;
+            player.CurrentRoomNumber = ShouldRespawnAtEvilDeathRoom(player) ? EvilDeathRespawnRoomNumber : DefaultDeathRespawnRoomNumber;
+            changed = true;
+            if (isOnline)
+            {
+                player.IsResting = false;
+                player.IsMeditating = false;
+                player.IsSneaking = false;
+                player.IsHidden = false;
+                NotifyPlayerEnteredRoom(player);
+                RepromptPlayer(player.Name);
+            }
+        }
+
+        return changed;
     }
 
-    /// <summary>The houses whose deed (ability 181) a gang member carries right now. Stock re-derives
-    /// ownership from exactly this at every cleanup: it walks every player record and, for a player in
-    /// a gang, marks the house of each deed in their pack as owned. A deed nobody carries — sold back to
-    /// the deed shop — leaves its house unowned, and the cleanup closes it (bug #243).</summary>
-    private HashSet<int> FindHeldGangHouseDeeds()
-    {
-        var held = new HashSet<int>();
-        var online = new HashSet<string>(_onlinePlayers.Keys, StringComparer.OrdinalIgnoreCase);
-        foreach (var player in GetAllOnlinePlayers())
-            AddCarriedDeedHouseIds(player, held);
+    // The two gang-house login notices, as stock prints them (bold white).
+    public static readonly string GangHouseClosedNotice = $"{MudAnsi.BrightWhite}Your ganghouse has been closed down!!{MudAnsi.Reset}";
+    public static readonly string GangHouseItemsGoneNotice = $"{MudAnsi.BrightWhite}Gang house items have dissappeared from your inventory!{MudAnsi.Reset}";
 
-        foreach (var name in PlayerRepo.GetAllPlayerNames())
+    // House ids (1..10) of every ability-183 item a character carries or wears.
+    private HashSet<int> GetCarriedGangHouseTags(Player player)
+    {
+        var tags = new HashSet<int>();
+        foreach (var itemId in player.Inventory.Concat(player.Equipment.Values))
         {
-            if (online.Contains(name))
+            if (Database.Items.TryGetValue(itemId, out var item)
+                && item.Abilities.GetValueOrDefault(GangHouseItemAbilityId) is var tag && tag is >= 1 and <= 10)
+                tags.Add(tag);
+        }
+        return tags;
+    }
+
+    /// <summary>The house floors at cleanup: every item and coin in a closed house's rooms is swept away,
+    /// and an owned house's floors lose any item tagged to a closed house. Returns true when anything went.</summary>
+    private bool ClearGangHouseFloors(Func<int, bool> isClosed)
+    {
+        bool changed = false;
+        foreach (var room in Database.Rooms.Values)
+        {
+            if (!room.IsGangHouse || room.GangHouseId is < 1 or > 10)
                 continue;
-            var player = PlayerRepo.LoadPlayerByName(name);
-            if (player != null)
-                AddCarriedDeedHouseIds(player, held);
+
+            var key = (room.MapNumber, room.RoomNumber);
+            bool closed = isClosed(room.GangHouseId);
+            lock (_groundItemLock)
+            {
+                if (_roomGroundItems.TryGetValue(key, out var items))
+                {
+                    int removedCount = items.RemoveAll(entry => closed
+                        || (Database.Items.TryGetValue(entry.ItemId, out var item)
+                            && item.Abilities.GetValueOrDefault(GangHouseItemAbilityId) is var tag
+                            && tag is >= 1 and <= 10 && isClosed(tag)));
+                    if (removedCount > 0)
+                        changed = true;
+                    if (items.Count == 0)
+                        _roomGroundItems.TryRemove(key, out _);
+                }
+            }
+
+            if (closed && _roomGroundCurrency.TryRemove(key, out _))
+                changed = true;
         }
-        return held;
+        return changed;
     }
 
-    // Stock only counts a deed held by a player in a gang, and only looks in the pack (a deed is never worn).
-    private void AddCarriedDeedHouseIds(Player player, ISet<int> held)
+    /// <summary>Charge the nightly tax to the deed carrier's bankbook: the first one at or above bank 8
+    /// (Bank of Godfrey), which is where the cleanup's keyed bank read lands. That one book must cover the
+    /// whole tax — the carrier's other banks are never touched. Returns false (⇒ eviction) otherwise.</summary>
+    internal static bool TryChargeGangHouseTax(Player carrier, long taxCopper)
     {
-        if (string.IsNullOrWhiteSpace(player.Gang))
-            return;
-        foreach (var itemId in player.Inventory)
-        {
-            int houseId = GetDeedHouseId(itemId);
-            if (houseId is >= 1 and <= 10)
-                held.Add(houseId);
-        }
-    }
+        if (taxCopper <= 0)
+            return true;
 
-    /// <summary>Remove every offline player's keys/emblems/keyrings/deed (ability 183) for any of the
-    /// evicted houses. Online players are handled live in EvictGangHouse.</summary>
-    private void SweepGangHouseItemsFromOfflinePlayers(ISet<int> evictedHouseIds)
-    {
-        var online = new HashSet<string>(_onlinePlayers.Keys, StringComparer.OrdinalIgnoreCase);
-        foreach (var name in PlayerRepo.GetAllPlayerNames())
-        {
-            if (online.Contains(name))
-                continue;
-            var player = PlayerRepo.LoadPlayerByName(name);
-            if (player != null && RemoveGangHouseTaggedItems(player, evictedHouseIds.Contains))
-                PlayerRepo.SavePlayer(player);
-        }
+        var books = carrier.BankBalances.Keys.Where(bank => bank >= GangHouseTaxBankNumber).ToList();
+        if (books.Count == 0)
+            return false;
+
+        int book = books.Min();
+        if (carrier.BankBalances[book] < taxCopper)
+            return false;
+
+        carrier.BankBalances[book] -= taxCopper;
+        return true;
     }
 
     /// <summary>Remove items whose ability 183 (Gang House Item) value matches <paramref name="matchesHouse"/>

@@ -89,10 +89,12 @@ public partial class CommandParser
             return;
         }
 
-        // Take the item out of the owner's inventory and persist the shop.
+        // Take the item out of the owner's inventory and persist the shop. The stocker becomes the shop's
+        // account: stock writes their name into the shop record, and the takings follow it.
         TryRemoveInventoryItemAt(carried.InventoryIndex, out _, out _);
         _world.RemoveItemRuntimeState(carried.InstanceId);
         RecalcEquipment();
+        _world.SetGangShopAccount(shop.Number, _player.Name);
         _world.PersistGangShop(shop.Number);
 
         await _client.SendLineAsync($"You add the {item.Name} to your shops stock.");

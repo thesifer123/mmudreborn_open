@@ -4,9 +4,9 @@ using Xunit;
 
 namespace mmudreborn.UnitTests;
 
-// Nightly gang-house tax is drawn from the gang leader's banked copper (largest balance first),
-// mirroring stock drawing house tax from the leader's bankbook. A leader who can't cover it is
-// evicted.
+// Nightly gang-house tax is drawn from the deed carrier's bankbook — the first one at or above bank 8,
+// which is where stock's keyed bank read lands — and that one book must cover it all. A carrier who
+// can't pay is evicted.
 public sealed class GangHouseTaxTests
 {
     [Fact]
@@ -36,17 +36,43 @@ public sealed class GangHouseTaxTests
     }
 
     [Fact]
-    public void Tax_drains_the_largest_balance_first_then_spills_over()
+    public void Tax_never_spills_over_into_a_second_bank()
     {
         var leader = new Player();
-        leader.BankBalances[8] = 1500;  // largest — fully drained
-        leader.BankBalances[41] = 1000; // covers the remainder
+        leader.BankBalances[8] = 1500;  // the book the tax is read from — short
+        leader.BankBalances[41] = 1000; // together they'd cover it, but stock never looks here
 
         bool paid = GameWorld.TryChargeGangHouseTax(leader, 2000);
 
+        Assert.False(paid);
+        Assert.Equal(1500, leader.BankBalances[8]);
+        Assert.Equal(1000, leader.BankBalances[41]);
+    }
+
+    [Fact]
+    public void Tax_comes_from_the_lowest_bankbook_at_or_above_bank_8()
+    {
+        var carrier = new Player();
+        carrier.BankBalances[5] = 999_999;    // below 8: never read
+        carrier.BankBalances[116] = 9_000;
+        carrier.BankBalances[83] = 3_000;     // the first book at or above 8
+
+        bool paid = GameWorld.TryChargeGangHouseTax(carrier, 2000);
+
         Assert.True(paid);
-        Assert.Equal(0, leader.BankBalances[8]);
-        Assert.Equal(500, leader.BankBalances[41]);
+        Assert.Equal(1_000, carrier.BankBalances[83]);
+        Assert.Equal(9_000, carrier.BankBalances[116]);
+        Assert.Equal(999_999, carrier.BankBalances[5]);
+    }
+
+    [Fact]
+    public void No_bankbook_at_or_above_bank_8_cannot_pay()
+    {
+        var carrier = new Player();
+        carrier.BankBalances[5] = 999_999;
+
+        Assert.False(GameWorld.TryChargeGangHouseTax(carrier, 2000));
+        Assert.Equal(999_999, carrier.BankBalances[5]);
     }
 
     [Fact]

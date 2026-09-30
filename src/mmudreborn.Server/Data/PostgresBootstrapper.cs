@@ -350,6 +350,9 @@ public sealed partial class PostgresBootstrapper
             // login-time recharge pass from refilling charged items on every reconnect — see
             // GameWorld.RechargePlayerItemsIfNeeded.
             ("LastCleanupUtc", "TEXT NOT NULL DEFAULT ''"),
+            // Gang-house bits of the stock status word: deed-sale lockout + pending login notices
+            // (Player.GangHouseFlags).
+            ("GangHouseFlags", "INTEGER NOT NULL DEFAULT 0"),
         };
 
         foreach (var (name, definition) in playerColumns)
@@ -363,6 +366,8 @@ public sealed partial class PostgresBootstrapper
         using (var cmd = new NpgsqlCommand("ALTER TABLE RoomGroundCurrency ADD COLUMN IF NOT EXISTS HiddenStacksJson TEXT NOT NULL DEFAULT ''", conn))
             cmd.ExecuteNonQuery();
 
+        using (var cmd = new NpgsqlCommand("ALTER TABLE GangShops ADD COLUMN IF NOT EXISTS Account CITEXT NOT NULL DEFAULT ''", conn))
+            cmd.ExecuteNonQuery();
         using (var cmd = new NpgsqlCommand("ALTER TABLE GangSettings ADD COLUMN IF NOT EXISTS LeaderName CITEXT NOT NULL DEFAULT ''", conn))
             cmd.ExecuteNonQuery();
         using (var cmd = new NpgsqlCommand("ALTER TABLE BugReports ADD COLUMN IF NOT EXISTS Status INTEGER NOT NULL DEFAULT 0", conn))

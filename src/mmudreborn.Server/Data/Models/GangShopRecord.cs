@@ -13,4 +13,7 @@ public sealed class GangShopRecord
     public int MarkupPercent { get; set; }
     /// <summary>Serialized stock slots: "itemId:qty:price:currency" entries joined by ';'.</summary>
     public string Slots { get; set; } = "";
+    /// <summary>Whose bankbook 8 the takings go to: the player who last stocked the shop (stock copies the
+    /// stocker's name into the shop record on every successful STOCK).</summary>
+    public string Account { get; set; } = "";
 }

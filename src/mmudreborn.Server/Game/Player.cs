@@ -987,6 +987,16 @@ public class Player
     // status word), so it must persist across the logout in between.
     public bool DisconnectedWhilePlaying { get; set; }
 
+    // Gang-house bits of the stock player status word, persisted like it:
+    //   DeedSold  — sold a deed to the deed shop; refuses another deed ("outstanding paper-work")
+    //               until the next cleanup clears it.
+    //   Closed    — pending login notice "Your ganghouse has been closed down!!".
+    //   ItemsGone — pending login notice "Gang house items have dissappeared from your inventory!".
+    public const int GangHouseDeedSoldFlag = 1;
+    public const int GangHouseClosedNoticeFlag = 2;
+    public const int GangHouseItemsGoneNoticeFlag = 4;
+    public int GangHouseFlags { get; set; }
+
     // LOOK style: false = traditional equipment list, true = modern full-slot equipment list.
     public bool UseModernLookStyle { get; set; } = false;
 

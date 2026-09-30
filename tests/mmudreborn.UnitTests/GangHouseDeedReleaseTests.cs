@@ -12,7 +12,7 @@ namespace mmudreborn.UnitTests;
 // stores an owner — the nightly cleanup walks every player record and a house is owned only while a
 // player in a gang carries its deed (ability 181). A house nobody carries the deed to is unowned: it
 // is not taxed, every player loses that house's keys/emblems/keyrings (ability 183), and the deed goes
-// back on the Realm Deed Shop shelf. Selling the deed is the gang's own choice, so no re-buy lockout.
+// back on the Realm Deed Shop shelf. Closing a house that way arms no re-buy lockout.
 public sealed class GangHouseDeedReleaseTests
 {
     private const int HouseId = 6;              // Blue
@@ -76,7 +76,7 @@ public sealed class GangHouseDeedReleaseTests
         Assert.Empty(repo.LoadPlayerByName("Birch")!.Inventory);
         Assert.False(repo.LoadPlayerByName("Birch")!.Equipment.ContainsKey(EmblemSlot));
         Assert.Equal(1, deedSlot.Current);   // deed back on the Realm Deed Shop shelf
-        Assert.False(world.IsGangHouseLockedOut(Gang));   // gave it up, didn't default: free to buy another
+        Assert.Equal(0, repo.LoadPlayerByName("Rook")!.GangHouseFlags & Player.GangHouseDeedSoldFlag);   // closing arms no lockout
     }
 
     [Fact]
@@ -96,17 +96,21 @@ public sealed class GangHouseDeedReleaseTests
     }
 
     [Fact]
-    public void A_gang_mate_carrying_the_deed_keeps_the_house_owned()
+    public void A_gang_mate_carrying_the_deed_keeps_the_house_owned_and_pays_the_tax()
     {
         var (world, repo, _) = CreateWorld();
         var rook = SaveOffline(repo, "Rook", Gang, BlueKeyId);
         rook.BankBalances[8] = 10_000_000;
-        SaveOffline(repo, "Birch", Gang, BlueDeedId);
+        var birch = SaveOffline(repo, "Birch", Gang, BlueDeedId);
+        birch.BankBalances[8] = 500_000;
         world.AssignGangHouse(HouseId, Gang, "Rook", DateTime.UtcNow);
 
         world.ProcessGangHouseTax(DateTime.UtcNow);
 
         Assert.True(world.IsGangHouseOwned(HouseId));
+        Assert.Equal("Birch", world.GetGangHouse(HouseId)!.OwnerPlayer);   // the carrier is the owner
+        Assert.Equal(500_000 - TaxGold * 100L, repo.LoadPlayerByName("Birch")!.BankBalances[8]);
+        Assert.Equal(10_000_000, repo.LoadPlayerByName("Rook")!.BankBalances[8]);   // the leader pays nothing
         Assert.Equal([BlueKeyId], repo.LoadPlayerByName("Rook")!.Inventory);
     }
 

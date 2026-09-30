@@ -3439,7 +3439,7 @@ public partial class CommandParser
             await _client.SendLineAsync($"  LEVELAHEAD: {FormatLevelAheadCap(_world.LevelAheadCap)}");
             await _client.SendLineAsync($"  GANG COST RUNIC: {_world.GangCreateRunicCost}");
             await _client.SendLineAsync($"  GANG MIN EXP: {_world.GangCreateMinimumExperience}");
-            await _client.SendLineAsync($"  GANG HOUSE MIN EXP: {_world.GangHouseMinimumExperience}");
+            await _client.SendLineAsync($"  GANG HOUSE MIN GANG EXP: {_world.GangHouseMinimumExperience}");
             await _client.SendLineAsync($"  LIMITED ITEMS: {_world.LimitedItemsMode}");
             await _client.SendLineAsync($"  GROUND LIMIT: {(_world.GroundItemLimitEnabled ? "ON" : "OFF")}");
             await _client.SendLineAsync($"  MAXEPDAY: {_world.MaxEvilPointsForgivenPerDay}");
@@ -4049,7 +4049,7 @@ public partial class CommandParser
         {
             if (tokens.Length == 1)
             {
-                await _client.SendLineAsync($"Gang house deed minimum experience is currently {_world.GangHouseMinimumExperience}.");
+                await _client.SendLineAsync($"Gang house deed minimum gang experience is currently {_world.GangHouseMinimumExperience}.");
                 return;
             }
 
@@ -4060,7 +4060,7 @@ public partial class CommandParser
             }
 
             _world.SetGangHouseMinimumExperience(requiredExp);
-            await _client.SendLineAsync($"Gang house deed minimum experience set to {_world.GangHouseMinimumExperience}.");
+            await _client.SendLineAsync($"Gang house deed minimum gang experience set to {_world.GangHouseMinimumExperience}.");
             return;
         }
 

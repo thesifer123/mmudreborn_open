@@ -10,8 +10,8 @@ namespace mmudreborn.Server;
 // each boot — a gang shop is stocked by its owners with items from their own inventory (STOCK),
 // emptied with UNSTOCK, and priced with a per-shop markup (MARKUP). Each shop has up to ten
 // slots (parallel item / qty / price / currency arrays, ten entries) plus
-// a shop markup. Buying from a gang shop deposits the takings into the owning gang leader's
-// bank account (bankbook 8). All of this mutable state is persisted
+// a shop markup. Buying from a gang shop deposits the takings into bankbook 8 of whoever last
+// stocked the shop (stock records the stocker's name in the shop). All of this mutable state is persisted
 // per shop (stock saves the whole shop record on a dirty flag); we mirror that with a row
 // per shop in the GangShops table.
 public partial class GameWorld
@@ -22,7 +22,7 @@ public partial class GameWorld
     public const int GangShopMaxMarkupPercent = 1000;
     public const int GangShopMaxSlotPrice = 9999;
     public const int GangShopControllerAbilityId = 184;   // value == room GangHouse#
-    // Gang-shop takings go to the leader's bankbook index 8 ("Bank of Godfrey").
+    // Gang-shop takings go to the stocker's bankbook index 8 ("Bank of Godfrey").
     public const int GangLeaderBankNumber = 8;
 
     public sealed class GangShopSlot
@@ -40,6 +40,8 @@ public partial class GameWorld
         public int ShopId { get; set; }
         public int MarkupPercent { get; set; }
         public GangShopSlot?[] Slots { get; } = new GangShopSlot?[GangShopSlotCount];
+        /// <summary>The player who last stocked the shop — the takings go to their bankbook 8.</summary>
+        public string Account { get; set; } = "";
     }
 
     private readonly object _gangShopLock = new();
@@ -180,6 +182,17 @@ public partial class GameWorld
                 slot.Currency = currencyGiven >= 0 ? Math.Clamp(currencyGiven, 0, 4) : Math.Clamp(itemDefaultCurrency, 0, 4);
             }
             return slotIndex;
+        }
+    }
+
+    /// <summary>Record who stocked the shop. Stock copies the stocker's name into the shop record after
+    /// every successful STOCK, and buyers' takings follow that name.</summary>
+    public void SetGangShopAccount(int shopId, string playerName)
+    {
+        lock (_gangShopLock)
+        {
+            if (_gangShops.TryGetValue(shopId, out var state))
+                state.Account = playerName;
         }
     }
 
@@ -327,6 +340,7 @@ public partial class GameWorld
     {
         string slots;
         int markup;
+        string account = "";
         bool exists;
         lock (_gangShopLock)
         {
@@ -340,6 +354,7 @@ public partial class GameWorld
             {
                 slots = SerializeGangShopSlots(state!);
                 markup = state!.MarkupPercent;
+                account = state.Account;
                 if (slots.Length == 0 && markup == 0)
                 {
                     // Nothing worth keeping — drop the in-memory state and the row together.
@@ -360,25 +375,29 @@ public partial class GameWorld
             ShopId = shopId,
             MarkupPercent = markup,
             Slots = slots,
+            Account = account,
         });
     }
 
-    /// <summary>Deposit gang-shop takings into the owning gang leader's bank (bankbook 8). No-op
-    /// when the host house is unowned or its leader can't be resolved.</summary>
+    /// <summary>Deposit gang-shop takings into bankbook 8 of the player who last stocked the shop
+    /// (stock pays the name it wrote into the shop record). A shop stocked
+    /// before that name was recorded pays the house's recorded owner — its deed carrier — instead.
+    /// No-op when neither resolves.</summary>
     public void DepositGangShopRevenue(int shopId, long copper)
     {
         if (copper <= 0)
             return;
 
-        int houseId = GetGangShopHouseId(shopId);
-        if (houseId <= 0)
-            return;
+        string leaderName;
+        lock (_gangShopLock)
+            leaderName = _gangShops.TryGetValue(shopId, out var state) ? state.Account : "";
 
-        var house = GetGangHouse(houseId);
-        if (house == null)
-            return;
-
-        string leaderName = PlayerRepo.GetGangLeaderName(house.OwnerGang) ?? house.OwnerPlayer;
+        if (string.IsNullOrWhiteSpace(leaderName))
+        {
+            int houseId = GetGangShopHouseId(shopId);
+            var house = houseId > 0 ? GetGangHouse(houseId) : null;
+            leaderName = house?.OwnerPlayer ?? "";
+        }
         if (string.IsNullOrWhiteSpace(leaderName))
             return;
 
@@ -432,7 +451,7 @@ public partial class GameWorld
 
     private static GangShopState DeserializeGangShop(GangShopRecord rec)
     {
-        var state = new GangShopState { ShopId = rec.ShopId, MarkupPercent = rec.MarkupPercent };
+        var state = new GangShopState { ShopId = rec.ShopId, MarkupPercent = rec.MarkupPercent, Account = rec.Account ?? "" };
         int slotIndex = 0;
         foreach (var part in (rec.Slots ?? "").Split(';', StringSplitOptions.RemoveEmptyEntries))
         {

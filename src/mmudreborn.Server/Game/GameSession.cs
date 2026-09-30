@@ -58,6 +58,19 @@ public class GameSession : IGameSession
                 _world.PlayerRepo.SavePlayer(player);
             }
 
+            // Gang-house notices a nightly cleanup left while this character was offline — printed and
+            // cleared by the same login sequence, right after the drop-carrier notice.
+            const int gangHouseNotices = Player.GangHouseClosedNoticeFlag | Player.GangHouseItemsGoneNoticeFlag;
+            if ((player.GangHouseFlags & gangHouseNotices) != 0)
+            {
+                if ((player.GangHouseFlags & Player.GangHouseClosedNoticeFlag) != 0)
+                    await _client.SendLineAsync(GameWorld.GangHouseClosedNotice);
+                if ((player.GangHouseFlags & Player.GangHouseItemsGoneNoticeFlag) != 0)
+                    await _client.SendLineAsync(GameWorld.GangHouseItemsGoneNotice);
+                player.GangHouseFlags &= ~gangHouseNotices;
+                _world.PlayerRepo.SavePlayer(player);
+            }
+
             var cmdParser = new CommandParser(_client, _world, player);
             _commandParser = cmdParser;
             await cmdParser.ShowCompletedBugReviewPromptsAsync();
