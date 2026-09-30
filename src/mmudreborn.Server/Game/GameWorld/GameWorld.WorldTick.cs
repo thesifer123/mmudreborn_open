@@ -2539,30 +2539,32 @@ public partial class GameWorld
             }
         }
 
-        // Hide dropped ground currency, but keep a room's static placed currency (room.GroundCurrency)
-        // visible — it is part of the game world. Hide only the copper above that placement amount.
+        // Hide dropped ground currency coin for coin: stock moves each denomination from the visible pile
+        // to the hidden one exactly as it lies and never exchanges it, so a night's heap of gold is still
+        // gold when it is found. (Adding the pile up as copper and re-minting it as the fewest, largest
+        // coins turned busy rooms' gold into platinum and runic.) A room's static placed currency
+        // (room.GroundCurrency) stays visible — it is part of the game world — as far as its own coins
+        // are still lying there.
         foreach (var key in _roomGroundCurrency.Keys.ToList())
         {
             var room = GetRoom(key.Map, key.Room);
             if (room != null && room.IsGangHouse)
                 continue;
 
-            long staticCopper = room == null ? 0 : Math.Max(0, room.GroundCurrency);
+            var placed = GroundCurrencyStacks.FromCopperNormalized(room == null ? 0 : Math.Max(0, room.GroundCurrency));
 
             _roomGroundCurrency.AddOrUpdate(
                 key,
                 _ => (GroundCurrencyStacks.Empty, GroundCurrencyStacks.Empty),
                 (_, current) =>
                 {
-                    long visibleCopper = current.Visible.TotalCopper;
-                    if (visibleCopper <= staticCopper)
-                        return current; // all visible is (at most) the static placement — leave it
+                    var kept = current.Visible.Min(placed);
+                    var dropped = current.Visible.Subtract(kept);
+                    if (dropped.IsEmpty)
+                        return current; // nothing but the static placement is lying here — leave it
 
-                    long droppedCopper = visibleCopper - staticCopper;
                     hidden++;
-                    return (
-                        GroundCurrencyStacks.FromCopperNormalized(staticCopper),
-                        current.Hidden.Add(GroundCurrencyStacks.FromCopperNormalized(droppedCopper)));
+                    return (kept, current.Hidden.Add(dropped));
                 });
         }
 

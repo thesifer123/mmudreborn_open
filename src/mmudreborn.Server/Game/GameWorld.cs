@@ -312,6 +312,28 @@ public partial class GameWorld : IBbsDoorContext
                 Copper + other.Copper);
         }
 
+        // Coin for coin, never an exchange between denominations: the smaller count of each.
+        public GroundCurrencyStacks Min(GroundCurrencyStacks other)
+        {
+            return new(
+                Math.Min(Runic, other.Runic),
+                Math.Min(Platinum, other.Platinum),
+                Math.Min(Gold, other.Gold),
+                Math.Min(Silver, other.Silver),
+                Math.Min(Copper, other.Copper));
+        }
+
+        // Coin for coin; the caller passes a pile no larger in any denomination (e.g. from Min).
+        public GroundCurrencyStacks Subtract(GroundCurrencyStacks other)
+        {
+            return new(
+                Runic - other.Runic,
+                Platinum - other.Platinum,
+                Gold - other.Gold,
+                Silver - other.Silver,
+                Copper - other.Copper);
+        }
+
         public long GetDenominationCount(long denominationMultiplier)
         {
             return denominationMultiplier switch
