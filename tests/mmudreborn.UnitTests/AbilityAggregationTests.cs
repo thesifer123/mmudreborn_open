@@ -170,7 +170,7 @@ public sealed class AbilityAggregationTests
         Assert.Equal(0, player.GetActiveAbilityValue(db, 116));
     }
 
-    // Abilities 44–49: primary-stat buffs (str/int/wis/agi/health/cha). 24 stock spells
+    // Abilities 44–49: primary-stat buffs (int/wis/str/health/agi/cha). 24 stock spells
     // carry these — bull's strength, fox's cunning, wisdom, owl's quickness, bear's endurance,
     // eagle's splendour, plus negative-magnitude curses. The ability application
     // writes the bonus into the stat fields and the secondary-stat pass re-derives Perception,
@@ -181,8 +181,8 @@ public sealed class AbilityAggregationTests
     {
         var (player, db, race, _) = Setup();
         player.BaseStrength = 50;
-        // Bull's-strength-style buff: ability 44 with magnitude 20.
-        db.Spells[800] = new GameSpell { Number = 800, Abilities = new Dictionary<int, int> { [44] = 20 } };
+        // Bull's-strength-style buff: ability 46 with magnitude 20.
+        db.Spells[800] = new GameSpell { Number = 800, Abilities = new Dictionary<int, int> { [46] = 20 } };
 
         player.RecalculateStats(race, new CharacterClass(), db);
         int baseMaxEncumbrance = player.MaxEncumbrance;
@@ -202,7 +202,7 @@ public sealed class AbilityAggregationTests
         player.BaseIntellect = 50;
         player.BaseWillpower = 50;
         player.BaseCharm = 50;
-        db.Spells[801] = new GameSpell { Number = 801, Abilities = new Dictionary<int, int> { [45] = 30 } };
+        db.Spells[801] = new GameSpell { Number = 801, Abilities = new Dictionary<int, int> { [44] = 30 } };
 
         player.RecalculateStats(race, new CharacterClass(), db);
         int baseMagicResist = player.MagicResist;
@@ -222,7 +222,7 @@ public sealed class AbilityAggregationTests
         var (player, db, race, _) = Setup();
         player.BaseAgility = 50;
         player.BaseCharm = 50;
-        db.Spells[802] = new GameSpell { Number = 802, Abilities = new Dictionary<int, int> { [47] = 25 } };
+        db.Spells[802] = new GameSpell { Number = 802, Abilities = new Dictionary<int, int> { [48] = 25 } };
 
         player.RecalculateStats(race, new CharacterClass(), db);
         int baseDodge = player.Dodge;
@@ -239,8 +239,8 @@ public sealed class AbilityAggregationTests
     {
         var (player, db, race, _) = Setup();
         player.BaseStrength = 60;
-        // Curse-style debuff: ability 44 (Strength) with NEGATIVE magnitude — duration buff drains Str.
-        db.Spells[803] = new GameSpell { Number = 803, Abilities = new Dictionary<int, int> { [44] = -25 } };
+        // Curse-style debuff: ability 46 (Strength) with NEGATIVE magnitude — duration buff drains Str.
+        db.Spells[803] = new GameSpell { Number = 803, Abilities = new Dictionary<int, int> { [46] = -25 } };
 
         player.AddOrRefreshActiveSpell(803, castLevel: 10, duration: 5);
         player.RecalculateStats(race, new CharacterClass(), db);
@@ -253,7 +253,7 @@ public sealed class AbilityAggregationTests
     {
         var (player, db, race, _) = Setup();
         player.BaseAgility = 50;
-        db.Spells[804] = new GameSpell { Number = 804, Abilities = new Dictionary<int, int> { [47] = 15 } };
+        db.Spells[804] = new GameSpell { Number = 804, Abilities = new Dictionary<int, int> { [48] = 15 } };
 
         player.AddOrRefreshActiveSpell(804, castLevel: 10, duration: 5);
         player.RecalculateStats(race, new CharacterClass(), db);
@@ -262,6 +262,77 @@ public sealed class AbilityAggregationTests
         player.RemoveActiveSpell(804);
         player.RecalculateStats(race, new CharacterClass(), db);
         Assert.Equal(50, player.Agility);
+    }
+
+    // Stock maps the stat-buff ids onto the effective-stat fields in field order, which is
+    // Int/Wis/Str/Hea/Agi/Chr — not the str/int/wis/agi/hea/chr display order. Each id must
+    // raise exactly its own stat and leave the other five at base.
+    [Theory]
+    [InlineData(44, "Intellect")]
+    [InlineData(45, "Willpower")]
+    [InlineData(46, "Strength")]
+    [InlineData(47, "Health")]
+    [InlineData(48, "Agility")]
+    [InlineData(49, "Charm")]
+    public void Each_stat_buff_ability_raises_only_its_own_stat(int abilityId, string expectedStat)
+    {
+        var (player, db, race, _) = Setup();
+        player.BaseStrength = 50;
+        player.BaseIntellect = 50;
+        player.BaseWillpower = 50;
+        player.BaseAgility = 50;
+        player.BaseHealth = 50;
+        player.BaseCharm = 50;
+        db.Spells[805] = new GameSpell { Number = 805, Abilities = new Dictionary<int, int> { [abilityId] = 7 } };
+
+        player.AddOrRefreshActiveSpell(805, castLevel: 10, duration: 5);
+        player.RecalculateStats(race, new CharacterClass(), db);
+
+        var stats = new Dictionary<string, int>
+        {
+            ["Strength"] = player.Strength,
+            ["Intellect"] = player.Intellect,
+            ["Willpower"] = player.Willpower,
+            ["Agility"] = player.Agility,
+            ["Health"] = player.Health,
+            ["Charm"] = player.Charm,
+        };
+        foreach (var (stat, value) in stats)
+            Assert.True(value == (stat == expectedStat ? 57 : 50), $"ability {abilityId}: {stat} was {value}");
+    }
+
+    // Bug #246: song of might (#47) carries ability 46 at value 0, so the rolled magnitude (+5)
+    // applies — it must land on Strength, not Wisdom.
+    [Fact]
+    public void Song_of_might_raises_strength_not_wisdom()
+    {
+        var (player, db, race, _) = Setup();
+        player.BaseStrength = 50;
+        player.BaseWillpower = 50;
+        db.Spells[47] = new GameSpell { Number = 47, Abilities = new Dictionary<int, int> { [46] = 0, [115] = 8551, [122] = 98 } };
+
+        player.AddOrRefreshActiveSpell(47, castLevel: 5, duration: 5);
+        player.RecalculateStats(race, new CharacterClass(), db);
+
+        Assert.Equal(55, player.Strength);
+        Assert.Equal(50, player.Willpower);
+    }
+
+    // Bug #247: song of agility (#48) carries ability 48 at value 0 — the +5 must land on
+    // Agility, not Health.
+    [Fact]
+    public void Song_of_agility_raises_agility_not_health()
+    {
+        var (player, db, race, _) = Setup();
+        player.BaseAgility = 50;
+        player.BaseHealth = 50;
+        db.Spells[48] = new GameSpell { Number = 48, Abilities = new Dictionary<int, int> { [48] = 0, [115] = 8552, [122] = 99 } };
+
+        player.AddOrRefreshActiveSpell(48, castLevel: 5, duration: 5);
+        player.RecalculateStats(race, new CharacterClass(), db);
+
+        Assert.Equal(55, player.Agility);
+        Assert.Equal(50, player.Health);
     }
 
     [Fact]

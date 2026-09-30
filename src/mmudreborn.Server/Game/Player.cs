@@ -2167,11 +2167,13 @@ public class Player
             // MartialArts) then sees the boosted value. The same stat fields are written,
             // then secondary stats are recomputed
             // — same single-recompute model.
-            case 44: StrengthBonus += value; break;      // str enhance / weakness
-            case 45: IntellectBonus += value; break;     // int
-            case 46: WillpowerBonus += value; break;     // "Wisdom" in stock = our Willpower
-            case 47: AgilityBonus += value; break;       // agi
-            case 48: HealthBonus += value; break;        // health
+            // Stock order follows the effective-stat fields, NOT str/int/wis/agi/hea/chr:
+            // 44→Int, 45→Wis, 46→Str, 47→Hea, 48→Agi, 49→Chr (bugs #246/#247).
+            case 44: IntellectBonus += value; break;     // Alter Intellect
+            case 45: WillpowerBonus += value; break;     // Alter Wisdom — "Wisdom" in stock = our Willpower
+            case 46: StrengthBonus += value; break;      // Alter Strength
+            case 47: HealthBonus += value; break;        // Alter Health
+            case 48: AgilityBonus += value; break;       // Alter Agility
             case 49: CharmBonus += value; break;         // chr
             case 57: HasSeeHidden = true; break; // See Hidden
             case 60: IsAfraid = true; break; // Fear: afraid flag — can't cast/attack
