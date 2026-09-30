@@ -353,6 +353,9 @@ public sealed partial class PostgresBootstrapper
             // Gang-house bits of the stock status word: deed-sale lockout + pending login notices
             // (Player.GangHouseFlags).
             ("GangHouseFlags", "INTEGER NOT NULL DEFAULT 0"),
+            // Lifetime play time in 30s slow ticks (Player.PlayedHalfMinutes) for PROFILE's
+            // "Life for this CHAR".
+            ("PlayedHalfMinutes", "INTEGER NOT NULL DEFAULT 0"),
         };
 
         foreach (var (name, definition) in playerColumns)

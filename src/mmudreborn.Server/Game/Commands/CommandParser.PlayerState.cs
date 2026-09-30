@@ -644,7 +644,7 @@ public partial class CommandParser
         var (Location, RegenTime, RoomIllumination) = GetCurrentRoomDiagnostics();
 
         // Some profile fields are not wired yet; defaults are rendered in classic layout for now.
-        await _client.SendLineAsync("Life for this CHAR  357 minutes");
+        await _client.SendLineAsync($"Life for this CHAR  {_player.PlayedHalfMinutes / 2} minutes");
         await _client.SendLineAsync(ProfileLine("Location:", Location, profileLabelWidth));
         await _client.SendLineAsync(ProfileLine("Regen Time:", RegenTime, profileLabelWidth));
         await _client.SendLineAsync(ProfileLine("Room Illu:", RoomIllumination, profileLabelWidth));

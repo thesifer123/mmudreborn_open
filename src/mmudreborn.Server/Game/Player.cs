@@ -997,6 +997,12 @@ public class Player
     public const int GangHouseItemsGoneNoticeFlag = 4;
     public int GangHouseFlags { get; set; }
 
+    // Lifetime play time in 30s slow ticks — the PROFILE "Life for this CHAR" line shows it halved, as
+    // minutes. Stock bumps a per-session half-minute counter once per 30s slow pass and adds it, halved,
+    // to the character's saved total minutes; one persisted counter gives the same reading and survives
+    // logoff and server restarts.
+    public int PlayedHalfMinutes { get; set; }
+
     // LOOK style: false = traditional equipment list, true = modern full-slot equipment list.
     public bool UseModernLookStyle { get; set; } = false;
 

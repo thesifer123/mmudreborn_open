@@ -147,7 +147,7 @@ public class PlayerRepository : IPlayerRepository
              SuicidePassword, KeepMode, DisconnectedWhilePlaying,
              QuestAbilities,
              BankBalances,
-             ActiveSpells, DeathLog, PoisonLevel, TesterSysop, LastCleanupUtc, GangHouseFlags,
+             ActiveSpells, DeathLog, PoisonLevel, TesterSysop, LastCleanupUtc, GangHouseFlags, PlayedHalfMinutes,
              Inventory, Equipment)
             VALUES
             (@name, @pass, @race, @class, @level, @exp,
@@ -165,7 +165,7 @@ public class PlayerRepository : IPlayerRepository
              @suicidepassword, @keepmode, @disconnectedwhileplaying,
              @questabilities,
              @bankbalances,
-             @activespells, @deathlog, @poisonlevel, @testersysop, @lastcleanuputc, @ganghouseflags,
+             @activespells, @deathlog, @poisonlevel, @testersysop, @lastcleanuputc, @ganghouseflags, @playedhalfminutes,
              @inv, @equip)
             ON CONFLICT (Name) DO UPDATE SET
              Name = EXCLUDED.Name,
@@ -253,6 +253,7 @@ public class PlayerRepository : IPlayerRepository
              PoisonLevel = EXCLUDED.PoisonLevel,
              LastCleanupUtc = EXCLUDED.LastCleanupUtc,
              GangHouseFlags = EXCLUDED.GangHouseFlags,
+             PlayedHalfMinutes = EXCLUDED.PlayedHalfMinutes,
              Inventory = EXCLUDED.Inventory,
              Equipment = EXCLUDED.Equipment";
 
@@ -414,6 +415,7 @@ public class PlayerRepository : IPlayerRepository
                 ? ""
                 : player.LastCleanupAppliedUtc.ToString("o", CultureInfo.InvariantCulture)),
             P("@ganghouseflags", player.GangHouseFlags),
+            P("@playedhalfminutes", player.PlayedHalfMinutes),
             P("@inv", JsonSerializer.Serialize(player.Inventory)),
             P("@equip", JsonSerializer.Serialize(player.Equipment)),
         };
@@ -848,6 +850,10 @@ public class PlayerRepository : IPlayerRepository
         player.GangHouseFlags = reader.IsDBNull(reader.GetOrdinal("GangHouseFlags"))
             ? 0
             : reader.GetInt32(reader.GetOrdinal("GangHouseFlags"));
+
+        player.PlayedHalfMinutes = reader.IsDBNull(reader.GetOrdinal("PlayedHalfMinutes"))
+            ? 0
+            : reader.GetInt32(reader.GetOrdinal("PlayedHalfMinutes"));
 
         var inv = reader.GetString(reader.GetOrdinal("Inventory"));
         player.Inventory = JsonSerializer.Deserialize<List<int>>(inv) ?? [];

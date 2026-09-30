@@ -330,6 +330,9 @@ public partial class GameWorld
             if (player.IsOutOfRealm)
                 continue;
 
+            // Lifetime play time (PROFILE "Life for this CHAR"): one half-minute per slow pass.
+            player.PlayedHalfMinutes++;
+
             ProcessEvilPointForgiveness(player, now);
 
             // Poison ticks once per 30s slow pass (not the
