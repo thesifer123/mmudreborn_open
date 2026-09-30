@@ -11,7 +11,8 @@ namespace mmudreborn.Server;
 // Buying a deed from the Realm Deed Shop (ShopType 12) grants ownership; the deed itself drives the
 // in-house command scripts (summon guard / make emblem / make key) via the existing textblock engine.
 // Each night the owning gang's leader is taxed (deed ability 182, in gold); a leader who can't pay is
-// evicted — ownership cleared, deed returned to the pool, gang-house-tagged items swept.
+// evicted — ownership cleared, deed returned to the pool, gang-house-tagged items swept. A house whose
+// deed no gang member carries any more (sold back to the deed shop, say) is closed the same way.
 public partial class GameWorld
 {
     public const int GangHouseDeedAbilityId = 181;   // value = house id 1..10
@@ -170,12 +171,25 @@ public partial class GameWorld
         lock (_gangHouseLock)
             owned = _gangHouses.Values.ToList();
 
+        var heldHouseIds = owned.Count > 0 ? FindHeldGangHouseDeeds() : new HashSet<int>();
+
         var evictedHouseIds = new HashSet<int>();
         foreach (var house in owned)
         {
             int taxGold = GetHouseTaxGold(house.HouseId);
             long taxCopper = (long)taxGold * 100;            // tax = the ability value * 100 copper
             string colour = GangHouseColorName(house.HouseId);
+
+            // Nobody carries the deed any more, so the house is no longer owned: stock re-derives
+            // ownership from the deed each cleanup and never taxes a house without one. It closes
+            // silently and arms no re-buy lockout — the gang gave the deed up, it didn't default.
+            if (!heldHouseIds.Contains(house.HouseId))
+            {
+                Console.WriteLine($"GangHouse {house.HouseId} ({colour}): no gang member carries the deed — closing.");
+                EvictGangHouse(house, unpaidTax: false);
+                evictedHouseIds.Add(house.HouseId);
+                continue;
+            }
 
             string leaderName = PlayerRepo.GetGangLeaderName(house.OwnerGang) ?? house.OwnerPlayer;
             bool online = _onlinePlayers.TryGetValue(leaderName, out var leader);
@@ -194,7 +208,7 @@ public partial class GameWorld
             else
             {
                 Console.WriteLine($"GangHouse {house.HouseId} ({colour}): {house.OwnerGang} could not pay {taxGold}g tax — evicting.");
-                EvictGangHouse(house);
+                EvictGangHouse(house, unpaidTax: true);
                 evictedHouseIds.Add(house.HouseId);
             }
         }
@@ -229,13 +243,18 @@ public partial class GameWorld
         return true;
     }
 
-    private void EvictGangHouse(GangHouseRecord house)
+    // unpaidTax=false closes a house nobody holds the deed to: the same teardown, minus the re-buy
+    // lockout and the "failed to pay the tax" notice.
+    private void EvictGangHouse(GangHouseRecord house, bool unpaidTax)
     {
         lock (_gangHouseLock)
         {
             _gangHouses.Remove(house.HouseId);
-            _gangHouseLockouts.Add(house.OwnerGang);        // can't re-buy until next cleanup clears it
-            PersistGangHouseLockouts();
+            if (unpaidTax)
+            {
+                _gangHouseLockouts.Add(house.OwnerGang);    // can't re-buy until next cleanup clears it
+                PersistGangHouseLockouts();
+            }
         }
         PlayerRepo.DeleteGangHouse(house.HouseId);
         SetGangHouseDeedInStock(house.HouseId, true);        // deed returns to the pool
@@ -248,12 +267,50 @@ public partial class GameWorld
                 RecalculatePlayerStats(player);              // a worn emblem's bonus must drop too
         }
 
+        if (!unpaidTax)
+            return;
+
         string colour = GangHouseColorName(house.HouseId);
         foreach (var player in GetAllOnlinePlayers())
         {
             if (string.Equals(player.Gang, house.OwnerGang, StringComparison.OrdinalIgnoreCase))
                 SendToPlayer(player.Name,
                     $"{MudAnsi.BrightRed}Your gang failed to pay the tax — the {colour} Gang House has been closed down!{MudAnsi.Reset}");
+        }
+    }
+
+    /// <summary>The houses whose deed (ability 181) a gang member carries right now. Stock re-derives
+    /// ownership from exactly this at every cleanup: it walks every player record and, for a player in
+    /// a gang, marks the house of each deed in their pack as owned. A deed nobody carries — sold back to
+    /// the deed shop — leaves its house unowned, and the cleanup closes it (bug #243).</summary>
+    private HashSet<int> FindHeldGangHouseDeeds()
+    {
+        var held = new HashSet<int>();
+        var online = new HashSet<string>(_onlinePlayers.Keys, StringComparer.OrdinalIgnoreCase);
+        foreach (var player in GetAllOnlinePlayers())
+            AddCarriedDeedHouseIds(player, held);
+
+        foreach (var name in PlayerRepo.GetAllPlayerNames())
+        {
+            if (online.Contains(name))
+                continue;
+            var player = PlayerRepo.LoadPlayerByName(name);
+            if (player != null)
+                AddCarriedDeedHouseIds(player, held);
+        }
+        return held;
+    }
+
+    // Stock only counts a deed held by a player in a gang, and only looks in the pack (a deed is never worn).
+    private void AddCarriedDeedHouseIds(Player player, ISet<int> held)
+    {
+        if (string.IsNullOrWhiteSpace(player.Gang))
+            return;
+        foreach (var itemId in player.Inventory)
+        {
+            int houseId = GetDeedHouseId(itemId);
+            if (houseId is >= 1 and <= 10)
+                held.Add(houseId);
         }
     }
 
