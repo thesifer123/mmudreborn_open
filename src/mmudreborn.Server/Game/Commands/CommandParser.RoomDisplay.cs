@@ -759,10 +759,11 @@ public partial class CommandParser
         }
     }
 
-    // The item description to show on `look <item>`, or null if there is none. We ship no .DSC/.TXT
-    // description files, so a stock "FILE DESCRIPTION <file>" pointer has no backing text — treat it as
-    // no description (the item then reads "You see nothing special about ...") rather than printing the
-    // raw "FILE DESCRIPTION ..." token. Items given a real DB description render it normally.
+    // The item description to show on `look <item>`, or null if there is none. A stock "FILE DESCRIPTION
+    // <file>" pointer whose file we don't ship in Data/assets (TryHandleFileDescriptionItemLook found none)
+    // has no backing text — treat it as no description (the item then reads "You see nothing special
+    // about ...") rather than printing the raw "FILE DESCRIPTION ..." token. Items given a real DB
+    // description render it normally.
     private static string? GetUsableItemDescription(Item item)
     {
         if (string.IsNullOrWhiteSpace(item.Description))
@@ -1383,9 +1384,9 @@ public partial class CommandParser
         if (string.IsNullOrWhiteSpace(customText))
             return false;
 
-        await _client.SendLineAsync($"{MudAnsi.BrightCyan}{item.Name}{MudAnsi.Reset}");
+        // Stock prints the file's lines verbatim in white, with no item-name header.
         foreach (var line in customText.Split('\n'))
-            await _client.SendLineAsync(line);
+            await _client.SendLineAsync($"{MudAnsi.White}{line}{MudAnsi.Reset}");
 
         return true;
     }
