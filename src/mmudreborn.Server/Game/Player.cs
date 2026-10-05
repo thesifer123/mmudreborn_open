@@ -479,6 +479,11 @@ public class Player
     public int IncomingHitsThisTick { get; private set; }
     public void ResetIncomingHitsThisTick() => IncomingHitsThisTick = 0;
     public void RecordIncomingHitThisTick() => IncomingHitsThisTick++;
+    // Place in the autocombat queue (higher = further back). Stamped by GameWorld.QueueAutocombat each
+    // time the player engages and again after each of their swings; the round's own swings run in this
+    // order. Transient, never persisted.
+    [JsonIgnore]
+    public long AutocombatQueueStamp { get; set; }
     [JsonIgnore]
     public KnockdownKind KnockdownKind { get; private set; }
     [JsonIgnore]

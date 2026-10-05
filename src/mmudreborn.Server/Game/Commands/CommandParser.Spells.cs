@@ -1683,6 +1683,7 @@ public partial class CommandParser
             : _world.GetNextCombatPulseUtc(now);
 
         _player.InCombat = true;
+        _world.QueueAutocombat(_player);   // to the back of the round's swing order (bug #251)
         _player.CombatTarget = null;        // area attack has no single locked target
         _player.PlayerCombatTarget = null;
         _player.PendingCombatRoundAction = PlayerCombatRoundAction.Attack;

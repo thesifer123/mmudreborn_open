@@ -285,6 +285,7 @@ public partial class CommandParser
         monster.MarkPlayerEngaged(_player.Name);
         ApplyMonsterRetargetOnAttack(monster);
         _player.InCombat = true;
+        _world.QueueAutocombat(_player);   // to the back of the round's swing order (bug #251)
         _player.CombatTarget = monster;
         _player.PlayerCombatTarget = null;
         _player.AddIncomingMonsterAttacker(monster);
@@ -323,6 +324,7 @@ public partial class CommandParser
         await ApplyPvpAggressionEvilAsync(target);
 
         _player.InCombat = true;
+        _world.QueueAutocombat(_player);   // to the back of the round's swing order (bug #251)
         _player.CombatTarget = null;
         _player.PlayerCombatTarget = target;
         _player.PendingCombatRoundAction = openingAction;

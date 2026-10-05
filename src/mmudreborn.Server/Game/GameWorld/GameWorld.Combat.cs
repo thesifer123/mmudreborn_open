@@ -126,19 +126,23 @@ public partial class GameWorld
         // melee round never re-engages. Snapshotting keeps dueness invariant for the whole beat.
         var dueThisBeat = new HashSet<Player>(players.Where(p => IsCombatBeatDue(p, now)));
 
-        var backstabbers = SelectDueBackstabbers(players, now);
+        // The players' own swings run in autocombat-queue order (bug #251), never in the order the online
+        // list happens to enumerate — see QueueAutocombat.
+        var queueOrder = OrderByAutocombatQueue(players);
+
+        var backstabbers = SelectDueBackstabbers(queueOrder, now);
         var backstabberSet = new HashSet<Player>(backstabbers);
         foreach (var player in backstabbers)
-            await RunPlayerCombatPhaseAsync(player, CommandParser.CombatBeatPhase.OwnAttack, dueThisBeat.Contains(player));
+            await RunPlayerOwnAttackAsync(player, dueThisBeat.Contains(player));
 
         bool playerAttacksFirst = _rng.Next(0, 100) < 60;
 
         async Task PlayerAttackPassAsync()
         {
-            foreach (var player in players)
+            foreach (var player in queueOrder)
             {
                 if (!backstabberSet.Contains(player)) // backstabbers already swung in the pre-pass
-                    await RunPlayerCombatPhaseAsync(player, CommandParser.CombatBeatPhase.OwnAttack, dueThisBeat.Contains(player));
+                    await RunPlayerOwnAttackAsync(player, dueThisBeat.Contains(player));
             }
         }
 
@@ -184,6 +188,30 @@ public partial class GameWorld
 
     private static bool IsCombatBeatDue(Player player, DateTime now)
         => player.NextMonsterAttackAtUtc != DateTime.MinValue && now >= player.NextMonsterAttackAtUtc;
+
+    // The autocombat queue. Every attack command appends the player to the BACK of one realm-wide queue,
+    // and the round walks that queue front to back; each player's swing ends by appending them to the back
+    // again, so the order holds round after round. Only a fresh attack moves someone (to the back). Smash,
+    // bash and every other attack queue exactly like a plain attack — only a backstab jumps ahead, in its
+    // own pre-pass. A stamp from one rising counter is that queue: lower stamp = nearer the front.
+    private long _autocombatQueueCounter;
+
+    internal void QueueAutocombat(Player player)
+        => player.AutocombatQueueStamp = Interlocked.Increment(ref _autocombatQueueCounter);
+
+    internal static List<Player> OrderByAutocombatQueue(IEnumerable<Player> players)
+        => players.OrderBy(p => p.AutocombatQueueStamp).ToList();
+
+    // A player's own swing for this beat, then back to the end of the queue as the swing re-engages them.
+    // Re-queueing every swinger in the order they swung keeps their relative order, and it also absorbs a
+    // mid-round re-engage (a combat spell re-engages its target as it resolves) that would otherwise push
+    // that one player behind everyone else.
+    private async Task RunPlayerOwnAttackAsync(Player player, bool due)
+    {
+        await RunPlayerCombatPhaseAsync(player, CommandParser.CombatBeatPhase.OwnAttack, due);
+        if (due && player.InCombat)
+            QueueAutocombat(player);
+    }
 
     private async Task RunPlayerCombatPhaseAsync(Player player, CommandParser.CombatBeatPhase phase, bool due)
     {
