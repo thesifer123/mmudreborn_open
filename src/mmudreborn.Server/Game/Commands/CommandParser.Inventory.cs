@@ -898,7 +898,7 @@ public partial class CommandParser
         {
             if (!m.IsDead)
             {
-                string color = GetMonsterColor(m.Template, _player.PaletteId);
+                string color = GetMonsterColor(m.Template, _player.PaletteId, _player.EvilPoints);
                 // A pet shows the " (Charmed)" tag ONLY to its owner.
                 string charmedTag = m.IsOwnedBy(_player.Name) ? " (Charmed)" : string.Empty;
                 alsoHereParts.Add($"{color}{m.DisplayName}{charmedTag}{MudAnsi.Reset}");
@@ -928,11 +928,16 @@ public partial class CommandParser
         return _world.EvilTimers.DisplayEvilStar(viewed.Name, _player.Name) ? "*" : string.Empty;
     }
 
-    // Monster colour for "Also here:" — based on monster alignment
-    // Hostile (Align 1,2,5,6) = BrightMagenta, Guards/Templars (Align 4) = White, Peaceful (Align 0,3) = Cyan
-    private static string GetMonsterColor(Monster template, int paletteId = 0)
+    // Monster colour for "Also here:" — based on monster alignment AND the viewer's evil points.
+    // Peaceful (Align 0,3) = Cyan, hostile (Align 1,2,5) = BrightMagenta. Guards (Align 4) and evil NPCs
+    // (Align 6) flip at the Outlaw line (bug #253): the room display tests the VIEWER's EP < 40 — a guard
+    // is White to a viewer below it and hostile-coloured to an Outlaw+, an align-6 monster the reverse.
+    private const int MonsterColorEvilPointsCut = 40;
+
+    private static string GetMonsterColor(Monster template, int paletteId = 0, float viewerEvilPoints = 0)
     {
         GameColorPalette palette = GameColorPalettes.Resolve(paletteId);
+        bool viewerBelowOutlaw = viewerEvilPoints < MonsterColorEvilPointsCut;
 
         return template.Align switch
         {
@@ -940,9 +945,9 @@ public partial class CommandParser
             1 => palette.Get(GameColorRole.MonsterHostile),
             2 => palette.Get(GameColorRole.MonsterHostile),
             3 => palette.Get(GameColorRole.MonsterPeaceful),
-            4 => palette.Get(GameColorRole.MonsterLawful),
+            4 => palette.Get(viewerBelowOutlaw ? GameColorRole.MonsterLawful : GameColorRole.MonsterHostile),
             5 => palette.Get(GameColorRole.MonsterHostile),
-            6 => palette.Get(GameColorRole.MonsterHostile),
+            6 => palette.Get(viewerBelowOutlaw ? GameColorRole.MonsterHostile : GameColorRole.MonsterLawful),
             _ => palette.Get(GameColorRole.MonsterPeaceful),
         };
     }
