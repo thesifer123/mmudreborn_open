@@ -2049,14 +2049,17 @@ public partial class CommandParser
         // Monster summon (ability 12): the monster calls reinforcements — spawn ONE
         // monster per summon slot (see ResolveSummonTemplateIds) as a pet owned by the caster and set it
         // on the player so it joins the fight. TrySummonReinforcement carries the child-list cap (10)
-        // and the alignment-AI aggro gate, and is re-evaluated per summon so a multi-slot spell cannot
+        // and the aggro decision, and is re-evaluated per summon so a multi-slot spell cannot
         // overshoot the cap. Checked before the debuff branch so a duration summon spell isn't mistaken
-        // for a player debuff.
+        // for a player debuff. The mid-spell dispatcher hands Targets 0/8 to the single-target monster
+        // cast, which locks the summon onto this player (bug #248: the dwarven/royal guard summons);
+        // 1/2/4 and the area types summon without a lock.
         var summonTemplateIds = ResolveSummonTemplateIds(spell);
         if (summonTemplateIds.Count > 0)
         {
+            Player? lockOnto = spell.Targets is 0 or 8 ? _player : null;
             foreach (int summonTemplateId in summonTemplateIds)
-                TrySummonReinforcement(attacker, summonTemplateId);
+                TrySummonReinforcement(attacker, summonTemplateId, lockOnto);
 
             await SendCombatMessagesToCurrentPlayerAsync([GameAnsi.SpellHostile($"{attackerDisplayName} casts {spell.Name}.")]);
             BroadcastCombatMessagesToRoom([GameAnsi.SpellHostile($"{attackerDisplayName} casts {spell.Name}.")]);
@@ -2215,11 +2218,16 @@ public partial class CommandParser
         // MinBase..MaxBase (0..0 for "calls for aid") as HP loss — "short guardsman's calls for aid hits
         // you for 0 damage!" (bug #135). The AtkHitSpell / AtkType=2 paths reach this resolver; the
         // MidSpell, CreateSpell and DeathSpell paths catch summons earlier and never get here.
+        // These casts go straight to the monster cast, whose single-target branch (Targets 0/2/6/8)
+        // locks each summon onto the target — so the guardsman's "calls for aid" (#888, Targets 8)
+        // brings a guardsman that attacks the caller's victim even though, unlocked, an align-4 Group-37
+        // guardsman never starts a fight (bug #248). Any other Targets goes to the area cast, no lock.
         var summonTemplateIds = ResolveSummonTemplateIds(spell);
         if (summonTemplateIds.Count > 0)
         {
+            Player? lockOnto = spell.Targets is 0 or 2 or 6 or 8 ? target : null;
             foreach (int summonTemplateId in summonTemplateIds)
-                TrySummonReinforcement(attacker, summonTemplateId);
+                TrySummonReinforcement(attacker, summonTemplateId, lockOnto);
             AddMonsterSummonCastMessages(spell, attacker, target, playerMessages, roomMessages);
             return (playerMessages, roomMessages);
         }
@@ -2496,13 +2504,19 @@ public partial class CommandParser
     // Capped at the summoner child-list size (10). Spawning routes through TrySpawnMonsterInRoom,
     // which fires the summoned monster's own CreateSpell in turn.
     //
-    // The summon ability places the new monster but
+    // With `lockOnto` set (the single-target monster cast), the summon is LOCKED onto that player: the
+    // cast copies the target's name into the new monster's target-name slot and clears its pet byte,
+    // so it attacks them through the bound branch with no alignment test, exactly as CheckEncounters
+    // treats any locked monster. That is how the guardsman's "calls for aid" works — the summoned
+    // guardsman (#13: align 4, Group 37) would never start a fight on its own (bug #248).
+    //
+    // Without a lock (self/ally and area casts) the summon ability places the new monster but
     // sets NO target/aggro on it — whether it attacks is decided by normal alignment AI (ShouldMonsterAggro),
     // exactly like any other monster in the room. So a hostile reinforcement (align 1/2/5/6) joins the fight
     // immediately, while a non-hostile summon spawns passive and only defends itself if attacked. This is
     // the master-assassin (740) death-spell case: its DeathSpell 902 summons the "dying master assassin"
     // (745, align 3 "Neutral [Not Hostile]"), which must NOT swing at the killer unprovoked.
-    private void TrySummonReinforcement(MonsterInstance caster, int summonTemplateId)
+    private void TrySummonReinforcement(MonsterInstance caster, int summonTemplateId, Player? lockOnto = null)
     {
         int existingChildren = _world.GetMonstersInRoom(caster.MapNumber, caster.RoomNumber)
             .Count(m => ReferenceEquals(m.Owner, caster) && !m.IsDead);
@@ -2513,7 +2527,19 @@ public partial class CommandParser
             && summoned != null)
         {
             summoned.Owner = caster;
-            if (CombatEngine.ShouldMonsterAggro(summoned.Template, _player))
+            if (lockOnto != null)
+            {
+                summoned.SetLockedTarget(lockOnto.Name);
+                // Same gate as CheckEncounters' bound branch: a locked monster with no attack at all, or
+                // one the player holds a pacifier for, takes no swing.
+                if (CombatEngine.CanMonsterRetaliate(summoned.Template)
+                    && !CombatEngine.PlayerHoldsMonsterPacifier(summoned.Template, lockOnto))
+                {
+                    summoned.MarkPlayerEngaged(lockOnto.Name);
+                    lockOnto.AddIncomingMonsterAttacker(summoned);
+                }
+            }
+            else if (CombatEngine.ShouldMonsterAggro(summoned.Template, _player))
             {
                 summoned.MarkPlayerEngaged(_player.Name);
                 _player.AddIncomingMonsterAttacker(summoned);
