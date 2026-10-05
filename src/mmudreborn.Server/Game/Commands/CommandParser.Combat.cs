@@ -2191,11 +2191,16 @@ public partial class CommandParser
                     await SendCombatMessagesToCurrentPlayerAsync([GameAnsi.CombatOff("*Combat Off*")]);
             }
 
+            await CheckEncounters();
             return;
         }
 
-        if (!_player.InCombat && !IsActiveTarget(_player))
-            await CheckEncounters();
+        // The aggression scan runs every pulse for every player a monster can see, in combat or not —
+        // it never asks whether you are already fighting. So the moment a backstab blows a stealther's
+        // cover, every other hostile monster in the room joins in, whether the backstab target lived or
+        // died (bug #252). Scanning only idle players kept them out for the whole fight, and after a kill
+        // until the "*Combat Off*" pulse above — long enough to walk away untouched.
+        await CheckEncounters();
     }
 
     // Phase 2: the player's own swing. Dispatch follows stock exactly: the round is
@@ -2479,11 +2484,6 @@ public partial class CommandParser
 
         return p.IncomingMonsterAttackerCount;
     }
-
-    private static bool IsActiveTarget(Player p)
-        => PruneInactiveMonsterAttackers(p) > 0 ||
-           (p.CombatTarget != null && !p.CombatTarget.IsDead) ||
-           (p.PlayerCombatTarget != null && p.PlayerCombatTarget.CurrentHP > 0);
 
     private void ScheduleNextMonsterRound(Player p)
     {
