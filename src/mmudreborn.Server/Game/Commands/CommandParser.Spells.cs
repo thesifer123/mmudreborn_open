@@ -1485,6 +1485,21 @@ public partial class CommandParser
             return false;
         }
 
+        // An area channel with nothing left to hit (ticket #25). Stock re-runs the area cast every round;
+        // when its target count comes back zero it prints "Your spell has no effect in this room!" and the
+        // caster is simply not re-queued — autocombat ends right there, with NO "*Combat Off*". The count
+        // is taken before the mana test, so an empty room neither spends nor reports mana. We used to drop
+        // the channel the moment a sweep emptied the room and print "*Combat Off*" on the next beat instead.
+        if (spell.Targets == AreaEnemyTargetType
+            && GetEligibleAreaMonsterTargets().Count == 0
+            && GetEligibleAreaPlayerTargets().Count == 0)
+        {
+            await _client.SendLineAsync(GameAnsi.SpellFailure("Your spell has no effect in this room!"));
+            ClearPendingCombatSpellSelection();
+            _player.StopCombatLoop();
+            return true;   // the failed cast WAS this round's action (so the round still ends on a prompt)
+        }
+
         if (_player.CurrentMana < spell.ManaCost)
         {
             ClearPendingCombatSpellSelection();
@@ -1492,7 +1507,7 @@ public partial class CommandParser
             return false;
         }
 
-        // Area attack (Targets=12): re-hit everyone in the room this round. Ends when no target remains.
+        // Area attack (Targets=12): re-hit everyone in the room this round. An empty room ends it above.
         if (spell.Targets == AreaEnemyTargetType)
             return await ResolveAreaSpellRoundAsync(spell);
 
@@ -1602,8 +1617,8 @@ public partial class CommandParser
         await ResolveAreaSpellRoundAsync(spell);
     }
 
-    // One round of an area attack: spend mana, hit every eligible target once, then keep the spell
-    // selected if anyone remains (so it repeats), else end the channel. Returns true while it continues.
+    // One round of an area attack: spend mana, hit every eligible target once, then keep a combat-round
+    // spell selected so it repeats (an instant one is dropped). Returns true while it continues.
     private async Task<bool> ResolveAreaSpellRoundAsync(GameSpell spell)
     {
         if (IsInProtectedRoom())
@@ -1660,15 +1675,16 @@ public partial class CommandParser
             await ApplyAreaSpellToPlayerAsync(spell, target, toldFlags);
         }
 
-        // An instant area spell (EnergyCost==0) is a one-off; only a combat-round spell repeats.
-        bool targetsRemain = GetEligibleAreaMonsterTargets().Count > 0 || GetEligibleAreaPlayerTargets().Count > 0;
-        if (targetsRemain && usesCombatRound)
+        // An instant area spell (EnergyCost==0) is a one-off; only a combat-round spell repeats. Stock
+        // re-queues the combat-round channel at the end of EVERY round, even one that just emptied the
+        // room: only the next round's target count ends it (TryExecutePendingCombatSpellRoundAsync), so a
+        // monster that walks in before then is swept too.
+        if (usesCombatRound)
         {
             SetPendingCombatSpellSelection(spell.Number);
             return true;
         }
 
-        // Nothing left to hit — drop the channel; housekeeping emits "*Combat Off*" next beat.
         ClearPendingCombatSpellSelection();
         _player.CombatTarget = null;
         _player.PlayerCombatTarget = null;
@@ -1804,7 +1820,7 @@ public partial class CommandParser
         {
             // Area sweep: the caster keeps channelling across kills — HandleMonsterDeath now ends only
             // the fights of players locked onto THIS monster, and an area channel holds no single target,
-            // so no per-kill "*Combat Off*" fires. The single closing one comes from housekeeping.
+            // so no per-kill "*Combat Off*" fires. The channel ends on the next round's empty-room check.
             await HandleMonsterDeath(monster, CombatEngine.CreateMonsterDeathResult(monster));
             return;
         }

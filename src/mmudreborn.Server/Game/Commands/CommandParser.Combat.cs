@@ -2182,8 +2182,8 @@ public partial class CommandParser
                 // the break line. The only two break-line emissions inside the
                 // attack loop are for the attacker being unconscious/dead and for an
                 // RM_PROTECTED room (@25827). Death is a different path and DOES print the toggle,
-                // which is why clearedByDeath still emits — that also keeps the closing toggle on an
-                // area sweep that kills everything (no chosen target, so neither flag is set).
+                // which is why clearedByDeath still emits. (An area sweep that kills everything never
+                // lands here: its channel stays selected and ends on its own next round, ticket #25.)
                 //
                 // The extra toggle wedged MegaMUD. Across four live captures, kill-driven toggles were
                 // survived and re-engaged every time; the one time a target was dragged out of the room
