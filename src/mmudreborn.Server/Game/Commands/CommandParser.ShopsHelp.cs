@@ -634,6 +634,24 @@ public partial class CommandParser
             if (ambiguousNames != null)
                 return false;
 
+            // SELLWORN OFF (our QOL rule, not stock): when the name only matches gear the player is
+            // WEARING, being worn — not a missing item — is what refused the sale, so say that instead of
+            // "You don't have ...". If this shop wouldn't buy the worn item anyway, that is the real
+            // blocker, so give the "cannot sell here" line rather than send them off to remove it for nothing.
+            if (!sellWorn && commandName == "SELL")
+            {
+                var wornMatches = FindMatchingCarriedItems(target, includeEquipped: true, equippedOnly: true);
+                if (wornMatches.Count > 0)
+                {
+                    var wornItem = wornMatches[0].Item;
+                    bool singleWornItem = wornMatches.All(match => match.Item.Name.Equals(wornItem.Name, StringComparison.OrdinalIgnoreCase));
+                    errorMessage = singleWornItem && !shop.Items.Any(shopItem => shopItem.ItemId == wornItem.Number)
+                        ? $"You cannot sell {wornItem.Name} here."
+                        : $"Remove {(singleWornItem ? wornItem.Name : target)} before trying to sell.";
+                    return false;
+                }
+            }
+
             errorMessage = $"You don't have {target} to {actionName}.";
             return false;
         }
