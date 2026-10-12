@@ -1239,6 +1239,7 @@ public partial class GameWorld
         }
 
         bool anyExpired = false;
+        var castOnEndingFollowUps = new List<int>();
         foreach (var active in player.ActiveSpells.ToList())
         {
             active.RemainingDuration--;
@@ -1268,22 +1269,35 @@ public partial class GameWorld
                 // spell on the bearer. This is the jail auto-release backbone — the alignment-scaled
                 // "jail time" debuff (586/641-644) carries 151 → "exit jail" (585), which chains to a
                 // teleport out to the slums.
-                ApplyCastOnEndingEffect(player, expiredSpell);
+                ApplyCastOnEndingEffect(player, expiredSpell, castOnEndingFollowUps);
             }
         }
 
         if (anyExpired)
             RecalculatePlayerStats(player);
+
+        // Follow-ups that aren't a plain teleport chain are cast in full once the expiry pass is done
+        // (bug #254 — the pyramid eject, the timer cancel, drowning, ...). Natural expiry only: stock's
+        // termination upkeep casts the follow-up on expiry, never when death or a remove/dispel strips it.
+        foreach (int followUpSpellId in castOnEndingFollowUps)
+        {
+            var followUpClient = GetClientForPlayer(player.Name);
+            if (followUpClient == null)
+                break;
+            new CommandParser(followUpClient, this, player)
+                .RunCastOnEndingAsync(followUpSpellId)
+                .GetAwaiter().GetResult();
+        }
         return false;
     }
 
     private const int CastOnEndingAbilityId = 151;   // "Cast on ending"
 
-    // Resolve and apply the "cast on ending" follow-up of an expired timed spell. The only stock effect
-    // reached this way that needs world action is a teleport (the jail release: 585 → text 9113 → cast
-    // 929 → Teleport Room 1076). We follow the linked spell's chain to its teleport destination and move
-    // the bearer there; non-teleport follow-ups are left to the (already-applied) buff lifecycle.
-    private void ApplyCastOnEndingEffect(Player player, GameSpell expiredSpell)
+    // Resolve and apply the "cast on ending" follow-up of an expired timed spell. A follow-up that chains to
+    // a teleport (the jail release: 585 → text 9113 → cast 929 → Teleport Room 1076) is resolved here and the
+    // bearer moved. Any other follow-up is handed back through fullCastFollowUps for the caller to cast in
+    // full (natural expiry); a caller that passes none (dispel/remove) leaves it uncast, as stock does.
+    private void ApplyCastOnEndingEffect(Player player, GameSpell expiredSpell, List<int>? fullCastFollowUps = null)
     {
         if (!expiredSpell.Abilities.TryGetValue(CastOnEndingAbilityId, out int linkedSpellId))
             return;
@@ -1301,7 +1315,10 @@ public partial class GameWorld
             return;
 
         if (!TryResolveChainedSpellTeleport(linkedSpellId, depth: 0, out int targetMap, out int targetRoom, out int terminalSpellId))
+        {
+            fullCastFollowUps?.Add(linkedSpellId);
             return;
+        }
 
         // The terminal teleport spell of the chain is a real cast, so it shows its CastMsgB BEFORE the
         // ability-140 teleport relocates the player — for the jail release that is #929 "exit jail" carrying

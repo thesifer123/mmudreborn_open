@@ -909,6 +909,17 @@ public partial class CommandParser
         return handled;
     }
 
+    // Ability 151 "Cast on ending" when a timed spell runs out naturally. Stock casts the follow-up as a
+    // forced no-target cast — the same engine a script's `cast <id>` op runs — so send it through that op:
+    // a timed follow-up becomes its own slot, a scripted one runs its textblock (with its own room display
+    // on a teleport), a harm spell hurts, a remove-effect spell strips. Bug #254: the Great Pyramid's eject
+    // (#686 → random teleport/fall/fire-pit script) only ever ran this way.
+    public async Task RunCastOnEndingAsync(int spellId)
+    {
+        await ExecuteScriptLineAsync([$"cast {spellId}"], clueKeywords: null, depth: 0,
+            hasAlternativeMatch: false, useRoomCommandMessageSemantics: false);
+    }
+
     private async Task<bool> TryExecuteScriptLinesAsync(
         IEnumerable<DialogueScriptLine> scriptLines,
         string? triggerInput,

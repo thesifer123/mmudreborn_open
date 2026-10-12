@@ -943,6 +943,21 @@ public partial class CommandParser
             return new TriggeredSpellResult(Teleported: moved, StopProcessing: true);
         }
 
+        // A "cast on ending" spell that HAS a duration is a timer, not a carrier (bug #254). Stock fires ability
+        // 151's follow-up at cast time only when the spell's Duration is 0; with a duration the spell lands as a
+        // timed slot and its follow-up is cast when the slot runs out (GameWorld.ApplyCastOnEndingEffect). The
+        // Great Pyramid's entry exit casts "timer" (#685, Duration 80 → #686, the eject) — taken for a carrier,
+        // the eject fired the moment the player climbed in. An exit cast is a room cast, so the room-cast engine
+        // applies the slot and prints its cast line ("...time is running out!"), as a room's own spell would.
+        if (spell.Duration > 0 && spell.Abilities.ContainsKey(ChainSpellAbilityId) && !HasHarmAbility(spell))
+        {
+            if (announce == TriggeredCastAnnounce.RoomCast)
+                _world.CastRoomSpellOnPlayer(_player, spell.Number);
+            else
+                ApplyBuffSpellIfDuration(spell, _player);
+            return default;
+        }
+
         // Defensive carrier gate (ability 151, no harm): any OTHER triggered context that reaches this damage
         // fall-through with a spell-id POOL (a monster hit-spell / trap that is itself a carrier) must roll
         // a pool member and re-trigger it, not read the pool id as raw damage. Placed AFTER teleport/script
