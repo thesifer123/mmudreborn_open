@@ -1613,54 +1613,40 @@ public class PlayerRepository : IPlayerRepository
             deleteCurrency.ExecuteNonQuery();
         }
 
-        using (var insertItem = conn.CreateCommand())
+        // Bulk binary COPY, not one INSERT per row: this runs under the world gate (the slow tick's
+        // 4-minute flush and nightly cleanup), and a live realm carries thousands of ground rows — ~7k
+        // single-row round trips held the gate ~3s, stalling every command, combat beat and tick behind it.
+        // COPY joins the open transaction, so the DELETE + reload stays all-or-nothing.
+        using (var importItems = conn.BeginBinaryImport(
+            "COPY RoomGroundItems (MapNumber, RoomNumber, Sequence, ItemId, IsHidden) FROM STDIN (FORMAT BINARY)"))
         {
-            insertItem.Transaction = tx;
-            insertItem.CommandText = @"
-                INSERT INTO RoomGroundItems (MapNumber, RoomNumber, Sequence, ItemId, IsHidden)
-                VALUES (@map, @room, @sequence, @itemId, @isHidden)";
-            insertItem.Parameters.Add(new NpgsqlParameter("@map", NpgsqlDbType.Integer));
-            insertItem.Parameters.Add(new NpgsqlParameter("@room", NpgsqlDbType.Integer));
-            insertItem.Parameters.Add(new NpgsqlParameter("@sequence", NpgsqlDbType.Integer));
-            insertItem.Parameters.Add(new NpgsqlParameter("@itemId", NpgsqlDbType.Integer));
-            insertItem.Parameters.Add(new NpgsqlParameter("@isHidden", NpgsqlDbType.Integer));
-
             foreach (var row in itemRows)
             {
-                insertItem.Parameters["@map"].Value = row.MapNumber;
-                insertItem.Parameters["@room"].Value = row.RoomNumber;
-                insertItem.Parameters["@sequence"].Value = row.Sequence;
-                insertItem.Parameters["@itemId"].Value = row.ItemId;
-                insertItem.Parameters["@isHidden"].Value = row.IsHidden ? 1 : 0;
-                insertItem.ExecuteNonQuery();
+                importItems.StartRow();
+                importItems.Write(row.MapNumber, NpgsqlDbType.Integer);
+                importItems.Write(row.RoomNumber, NpgsqlDbType.Integer);
+                importItems.Write(row.Sequence, NpgsqlDbType.Integer);
+                importItems.Write(row.ItemId, NpgsqlDbType.Integer);
+                importItems.Write(row.IsHidden ? 1 : 0, NpgsqlDbType.Integer);
             }
+            importItems.Complete();
         }
 
-        using (var insertCurrency = conn.CreateCommand())
+        using (var importCurrency = conn.BeginBinaryImport(
+            "COPY RoomGroundCurrency (MapNumber, RoomNumber, VisibleCopper, HiddenCopper, VisibleStacksJson, HiddenStacksJson, StaticInitialized) FROM STDIN (FORMAT BINARY)"))
         {
-            insertCurrency.Transaction = tx;
-            insertCurrency.CommandText = @"
-                INSERT INTO RoomGroundCurrency (MapNumber, RoomNumber, VisibleCopper, HiddenCopper, VisibleStacksJson, HiddenStacksJson, StaticInitialized)
-                VALUES (@map, @room, @visible, @hidden, @visibleStacksJson, @hiddenStacksJson, @staticInitialized)";
-            insertCurrency.Parameters.Add(new NpgsqlParameter("@map", NpgsqlDbType.Integer));
-            insertCurrency.Parameters.Add(new NpgsqlParameter("@room", NpgsqlDbType.Integer));
-            insertCurrency.Parameters.Add(new NpgsqlParameter("@visible", NpgsqlDbType.Bigint));
-            insertCurrency.Parameters.Add(new NpgsqlParameter("@hidden", NpgsqlDbType.Bigint));
-            insertCurrency.Parameters.Add(new NpgsqlParameter("@visibleStacksJson", NpgsqlDbType.Text));
-            insertCurrency.Parameters.Add(new NpgsqlParameter("@hiddenStacksJson", NpgsqlDbType.Text));
-            insertCurrency.Parameters.Add(new NpgsqlParameter("@staticInitialized", NpgsqlDbType.Integer));
-
             foreach (var row in currencyRows)
             {
-                insertCurrency.Parameters["@map"].Value = row.MapNumber;
-                insertCurrency.Parameters["@room"].Value = row.RoomNumber;
-                insertCurrency.Parameters["@visible"].Value = row.VisibleCopper;
-                insertCurrency.Parameters["@hidden"].Value = row.HiddenCopper;
-                insertCurrency.Parameters["@visibleStacksJson"].Value = row.VisibleStacksJson;
-                insertCurrency.Parameters["@hiddenStacksJson"].Value = row.HiddenStacksJson;
-                insertCurrency.Parameters["@staticInitialized"].Value = row.StaticInitialized ? 1 : 0;
-                insertCurrency.ExecuteNonQuery();
+                importCurrency.StartRow();
+                importCurrency.Write(row.MapNumber, NpgsqlDbType.Integer);
+                importCurrency.Write(row.RoomNumber, NpgsqlDbType.Integer);
+                importCurrency.Write(row.VisibleCopper, NpgsqlDbType.Bigint);
+                importCurrency.Write(row.HiddenCopper, NpgsqlDbType.Bigint);
+                importCurrency.Write(row.VisibleStacksJson, NpgsqlDbType.Text);
+                importCurrency.Write(row.HiddenStacksJson, NpgsqlDbType.Text);
+                importCurrency.Write(row.StaticInitialized ? 1 : 0, NpgsqlDbType.Integer);
             }
+            importCurrency.Complete();
         }
 
         tx.Commit();
