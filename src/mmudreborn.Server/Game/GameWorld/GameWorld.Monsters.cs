@@ -218,8 +218,9 @@ public partial class GameWorld
 
         // Snapshot first: MoveMonster mutates _roomMonsters, so we can't relocate mid-iteration. The
         // wander DECISION (Group eligibility, the aggression roll, and the budget spend) happens here,
-        // faithfully; the chosen relocation is applied in the second loop.
-        foreach (var kvp in _roomMonsters)
+        // faithfully; the chosen relocation is applied in the second loop. Candidates are visited in
+        // monster-slot order, not room order — see GetRoomMonstersInSlotOrder.
+        foreach (var kvp in GetRoomMonstersInSlotOrder())
         {
             foreach (var monster in kvp.Value)
             {
@@ -313,6 +314,33 @@ public partial class GameWorld
         }
 
         return announcements;
+    }
+
+    // Stock's medium pass walks its active-monster buffer by SLOT — a position each monster keeps for its
+    // whole life — so the 3-attempt wander budget goes to the same monsters wherever they stand. Visiting
+    // monsters room by room instead (in our room dictionary's hash order) handed the budget to whichever
+    // rooms came first: their monsters moved every tick, while a room late in the order almost never let
+    // anyone leave. Wanderers drained into the last-visited room of each closed-off area until all 15 of
+    // its slots were full — 15 storm giants in the Storm Fortress waiting room 16/1183 (bug #256).
+    // Monsters come out in slot order; neighbours in that order that share a room are grouped, so the
+    // caller still sees (room, monsters) pairs.
+    private List<KeyValuePair<(int Map, int Room), List<MonsterInstance>>> GetRoomMonstersInSlotOrder()
+    {
+        var bySlot = _roomMonsters
+            .SelectMany(kvp => kvp.Value.Select(monster => (kvp.Key, Monster: monster)))
+            .OrderBy(entry => entry.Monster.BufferSlot)
+            .ToList();
+
+        var runs = new List<KeyValuePair<(int Map, int Room), List<MonsterInstance>>>();
+        foreach (var (key, monster) in bySlot)
+        {
+            if (runs.Count > 0 && runs[^1].Key == key)
+                runs[^1].Value.Add(monster);
+            else
+                runs.Add(new(key, [monster]));
+        }
+
+        return runs;
     }
 
     // True when the monster has someone to fight in its current room: a player it has already engaged

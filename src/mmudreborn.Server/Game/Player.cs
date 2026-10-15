@@ -2376,6 +2376,11 @@ public class MonsterInstance
     public bool IsBackgroundSpawn { get; set; }
     public bool IsPermanentNPC { get; set; } // Room.NPC - always present, respawns in place
 
+    // Our stand-in for stock's active-monster buffer slot: fixed for the monster's whole life, and the
+    // order the medium pass hands out the wander budget in (GameWorld.GetRoomMonstersInSlotOrder).
+    private static long _nextBufferSlot;
+    public long BufferSlot { get; } = Interlocked.Increment(ref _nextBufferSlot);
+
     // Monster last-move direction: ambient wander never immediately reverses its previous
     // step. Empty until the monster's first wander/pursuit move.
     public string LastMoveDirection { get; set; } = "";

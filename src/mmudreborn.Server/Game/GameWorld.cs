@@ -1717,7 +1717,19 @@ public partial class GameWorld : IBbsDoorContext
             if (!_roomMonsters.ContainsKey(key))
                 _roomMonsters[key] = [];
 
-            instance = MonsterInstance.Create(template, mapNumber, roomNumber, guaranteeAllDrops: ShouldGuaranteeFirstDrop(template));
+            // Stock's spawn needs one of the room's 15 monster slots free, and none of its flags bypass
+            // that — not even the force every summon passes — so a full room refuses the spawn outright.
+            if (IsRoomPhysicallyFull(key))
+            {
+                errorMessage = $"There is no room for the {template.Name} here.";
+                return false;
+            }
+
+            // Stock counts EVERY spawn except the room's own primary as a live offspring of the room it
+            // appears in (and of that room's control-room area) — summons included, since they go through
+            // the same spawn. So a boss's escorts use up its lair's MaxRegen until they die. Ours left them
+            // uncounted, so they arrived on top of a full lair and every boss respawn added more (bug #256).
+            instance = MonsterInstance.Create(template, mapNumber, roomNumber, isBackgroundSpawn: template.Number != room.NPC, guaranteeAllDrops: ShouldGuaranteeFirstDrop(template));
             // Spawned past the room's Group/MonsterType gate → exempt from the invalid-room sweep so it
             // isn't removed from under an in-progress fight (death-summons, reinforcements, quest adds, pets).
             instance.WasForcePlaced = ignoreRoomRestrictions;
