@@ -2332,7 +2332,12 @@ public class MonsterInstance
     private readonly ConcurrentDictionary<string, byte> _engagedPlayerNames = new(StringComparer.OrdinalIgnoreCase);
     private int _deathProcessingStarted;
     public Monster Template { get; set; } = null!;
-    public int CurrentHP { get; set; }
+    private int _currentHP;
+    public int CurrentHP
+    {
+        get => _currentHP;
+        set { if (_currentHP != value) { _currentHP = value; IsDirty = true; } }
+    }
     public int MaxHP { get; set; }
     public int CurrentEnergy { get; set; }
     public int MaxEnergy { get; set; }
@@ -2359,8 +2364,18 @@ public class MonsterInstance
     public bool IsDead => CurrentHP <= 0;
     public int RespawnTimer { get; set; }
     public DateTime? RespawnAtUtc { get; set; }
-    public int MapNumber { get; set; }
-    public int RoomNumber { get; set; }
+    private int _mapNumber;
+    private int _roomNumber;
+    public int MapNumber
+    {
+        get => _mapNumber;
+        set { if (_mapNumber != value) { _mapNumber = value; IsDirty = true; } }
+    }
+    public int RoomNumber
+    {
+        get => _roomNumber;
+        set { if (_roomNumber != value) { _roomNumber = value; IsDirty = true; } }
+    }
     public int HomeMapNumber { get; set; }
     public int HomeRoomNumber { get; set; }
 
@@ -2376,10 +2391,25 @@ public class MonsterInstance
     public bool IsBackgroundSpawn { get; set; }
     public bool IsPermanentNPC { get; set; } // Room.NPC - always present, respawns in place
 
-    // Our stand-in for stock's active-monster buffer slot: fixed for the monster's whole life, and the
-    // order the medium pass hands out the wander budget in (GameWorld.GetRoomMonstersInSlotOrder).
-    private static long _nextBufferSlot;
-    public long BufferSlot { get; } = Interlocked.Increment(ref _nextBufferSlot);
+    // Creation order, so monsters that appear together are handed their buffer slots in the order they
+    // spawned (GameWorld.RefreshMonsterBufferSlots).
+    private static long _nextSpawnSequence;
+    public long SpawnSequence { get; } = Interlocked.Increment(ref _nextSpawnSequence);
+
+    // This monster's slot in stock's active-monster buffer (-1 until assigned). The monster sweeps walk
+    // the buffer slot by slot, so the slot fixes when in each sweep this monster is updated — see
+    // GameWorld.MonsterSweeps.
+    public int BufferSlot { get; set; } = -1;
+
+    // Stock's per-monster "record changed since it was last saved" byte. It is set by anything that
+    // changes the saved record (moving, HP, a fight, spells, a lock) and cleared only when the slow
+    // background save reaches this monster's slot, or at nightly cleanup. A guard that is dirty patrols
+    // past the realm-wide wander budget, so once a guard has moved it keeps patrolling until it is saved.
+    public bool IsDirty { get; set; }
+
+    // The slow-update cycle this monster last had its slow update in; stock gives each monster at most
+    // one slow update per cycle however the sweep and the cycle overlap.
+    public int SlowUpdateStamp { get; set; }
 
     // Monster last-move direction: ambient wander never immediately reverses its previous
     // step. Empty until the monster's first wander/pursuit move.
@@ -2441,49 +2471,30 @@ public class MonsterInstance
     public int KnockdownTicksRemaining { get; private set; }
     public int KnockdownDescriptiveMessageId { get; private set; }
     public bool IsKnockedDown => KnockdownTicksRemaining > 0;
-    // Counts down world ticks until this monster's next HP-regen cycle (the slow monster update
-    // fires once per global slow pass, not every tick — see GameWorld.MonsterHpRegenIntervalTicks).
-    // Defaults to 0, so the monster's first processed tick fires the cycle and then seeds the
-    // interval — mirroring a freshly initialized regen marker. Monsters spawn
-    // at full HP, so that first fire is a no-op for them; thereafter heals land once per interval.
-    public int HpRegenCooldownTicks { get; set; }
 
-    /// <summary>
-    /// Once every <paramref name="intervalTicks"/> world ticks,
-    /// regenerate <see cref="Monster.HPRegen"/> HP (clamped to <see cref="MaxHP"/>). On all other
-    /// ticks just advance the countdown so the cadence stays fixed regardless of when damage lands.
-    /// </summary>
-    public void TickHpRegen(int intervalTicks)
+    // Monster poison: HP drained per slow update until the monster dies. Applied by a
+    // player poison spell (ability 19, max-merged). Stock has no monster cure path, so it runs to death.
+    private int _poisonLevel;
+    public int PoisonLevel
     {
-        if (IsDead || Template.HPRegen <= 0)
-            return;
-
-        if (--HpRegenCooldownTicks > 0)
-            return;
-
-        HpRegenCooldownTicks = intervalTicks;
-        if (CurrentHP < MaxHP)
-            CurrentHP = Math.Min(MaxHP, CurrentHP + Template.HPRegen);
+        get => _poisonLevel;
+        set { if (_poisonLevel != value) { _poisonLevel = value; IsDirty = true; } }
     }
 
-    // Monster poison: HP drained per slow pass until the monster dies. Applied by a
-    // player poison spell (ability 19, max-merged). Stock has no monster cure path, so it runs to death.
-    public int PoisonLevel { get; set; }
-    public int PoisonCooldownTicks { get; set; }
-
-    // Once per slow pass (same cadence as HP regen) drain the poison
-    // level from the monster's HP. Returns true if this drain just killed the monster.
-    public bool TickPoison(int intervalTicks)
+    // The slow update's HP work (GameWorld.MonsterSweeps), in stock's order: drain the poison level, then
+    // regenerate <see cref="Monster.HPRegen"/> HP clamped to <see cref="MaxHP"/>. Death is judged by the
+    // caller only after both, so a regen can carry a monster the poison took to 0 back above it. How often
+    // this comes round is set by the slow sweep — every 30 s cycle on a busy board, longer with few players.
+    public void ApplySlowUpdate()
     {
-        if (IsDead || PoisonLevel <= 0)
-            return false;
+        if (IsDead)
+            return;   // a dead monster has left the buffer
 
-        if (--PoisonCooldownTicks > 0)
-            return false;
+        if (PoisonLevel > 0)
+            CurrentHP -= PoisonLevel;
 
-        PoisonCooldownTicks = intervalTicks;
-        CurrentHP -= PoisonLevel;
-        return IsDead;
+        if (Template.HPRegen > 0 && CurrentHP < MaxHP)
+            CurrentHP = Math.Min(MaxHP, CurrentHP + Template.HPRegen);
     }
 
     public void ClearCarriedTreasure()
@@ -2529,6 +2540,7 @@ public class MonsterInstance
         _engagedPlayerNames.Clear();
         LockedTargetName = null;
         CreateSpellFired = false; // a re-spawned primary re-fires its CreateSpell
+        IsDirty = false;          // a revive is a fresh spawn, and stock spawns a monster clean
     }
 
     // The monster's SINGLE locked combat target (a player name). The engaged
@@ -2547,11 +2559,21 @@ public class MonsterInstance
 
     public void SetLockedTarget(string playerName)
     {
-        if (!string.IsNullOrWhiteSpace(playerName))
+        if (!string.IsNullOrWhiteSpace(playerName) && LockedTargetName != playerName)
+        {
             LockedTargetName = playerName;
+            IsDirty = true;
+        }
     }
 
-    public void ClearLockedTarget() => LockedTargetName = null;
+    public void ClearLockedTarget()
+    {
+        if (LockedTargetName != null)
+        {
+            LockedTargetName = null;
+            IsDirty = true;
+        }
+    }
 
     public void MarkPlayerEngaged(string playerName)
     {
@@ -2600,6 +2622,8 @@ public class MonsterInstance
     {
         int energyCap = GetCombatEnergyCap();
         MaxEnergy = energyCap;
+        // Fighting a round spends and refills the monster's energy, which stock saves with the record.
+        IsDirty = true;
         // Monster energy update, exactly:
         //   if      (current <  cap)  current += cap;   // refill — ACCUMULATES above cap, no upward clamp
         //   else if (current >  cap)  current  = cap;   // clamp DOWN to one cap
@@ -2682,6 +2706,8 @@ public class MonsterInstance
         if (spellId <= 0 || duration <= 0)
             return false;
 
+        IsDirty = true;
+
         foreach (var active in ActiveSpells)
         {
             if (active.SpellId == spellId)
@@ -2710,7 +2736,7 @@ public class MonsterInstance
     /// of the player ProcessActiveSpellUpkeep. Ability 1 disease / 8 drain drains HP, 18
     /// heals, 11 regenerates energy clamped to MaxEnergy, 20 drains poison.
     /// Magnitude = the slot ability value, falling back to the cast level (mirrors the player path). Poison
-    /// (19) is NOT here — it drains on the SLOW pass (TickPoison), matching the cadence split.
+    /// (19) is NOT here — it drains on the SLOW update (ApplySlowUpdate), matching the cadence split.
     /// Returns true if a drain killed the monster (caller defers RemoveDeadMonster).
     /// </summary>
     public bool TickSpellUpkeepEffects(Data.IGameDatabase db)
@@ -2761,6 +2787,8 @@ public class MonsterInstance
     {
         if (ActiveSpells.Count == 0)
             return false;
+
+        IsDirty = true;   // every slot's duration ticks down in the saved record
 
         bool changed = false;
         for (int i = ActiveSpells.Count - 1; i >= 0; i--)
@@ -2900,6 +2928,7 @@ public class MonsterInstance
 
         monster.RollCarriedTreasure(guaranteeAllDrops);
         monster.ResetEnergy();
+        monster.IsDirty = false;   // stock spawns a monster clean; setting it up above is not a change
         return monster;
     }
 }

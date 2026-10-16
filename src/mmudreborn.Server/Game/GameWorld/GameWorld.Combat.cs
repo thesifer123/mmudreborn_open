@@ -403,8 +403,30 @@ public partial class GameWorld
     // (ApplyMonsterPostAttackLock). Sharing the room is neither a miss nor a reset. Without this a lock
     // never ended: a duergar that took its departing swing at an Outlaw and then failed its chase roll
     // would attack them on sight whenever they next met, because a locked monster skips the alignment
-    // test. Stock keeps this count and the pet owner-follow count in the same byte, so it runs on the
-    // pet pass's cadence with the same limit.
+    // test. Stock keeps this count and the pet owner-follow count in the same byte, with the same limit;
+    // the count is taken by the monster's fast update, so it comes round as often as the fast sweep
+    // reaches the monster (GameWorld.MonsterSweeps).
+    private void ProcessHostileLockMiss(MonsterInstance monster)
+    {
+        // Exact name only — the slot holds a full name, and a prefix match could hand the lock to a
+        // different, longer-named player while its real target is offline.
+        if (_onlinePlayers.TryGetValue(monster.LockedTargetName!, out var target)
+            && target.CurrentMapNumber == monster.MapNumber
+            && target.CurrentRoomNumber == monster.RoomNumber)
+        {
+            return;
+        }
+
+        monster.IsDirty = true;   // the miss count is saved with the record
+        if (++monster.FollowAbandonTicks > PetFollowAbandonLimit)
+        {
+            monster.ClearLockedTarget();
+            monster.FollowAbandonTicks = 0;
+        }
+    }
+
+    // Test seam: one fast update for every monster locked onto a player — a full fast sweep's worth of
+    // miss checks.
     internal void ProcessHostileLockMisses()
     {
         List<MonsterInstance> locked;
@@ -415,22 +437,7 @@ public partial class GameWorld
         }
 
         foreach (var monster in locked)
-        {
-            // Exact name only — the slot holds a full name, and a prefix match could hand the lock to a
-            // different, longer-named player while its real target is offline.
-            if (_onlinePlayers.TryGetValue(monster.LockedTargetName!, out var target)
-                && target.CurrentMapNumber == monster.MapNumber
-                && target.CurrentRoomNumber == monster.RoomNumber)
-            {
-                continue;
-            }
-
-            if (++monster.FollowAbandonTicks > PetFollowAbandonLimit)
-            {
-                monster.ClearLockedTarget();
-                monster.FollowAbandonTicks = 0;
-            }
-        }
+            ProcessHostileLockMiss(monster);
     }
 
     // The light-level clamp / blinding-bright threshold: room-wide light caps at 900 ("Daylight"),

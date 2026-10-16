@@ -16,6 +16,7 @@ public partial class GameWorld
         _slowTimer = new Timer(SlowTick, null, SlowTickInterval, SlowTickInterval);
         _roomSpellTimer = new Timer(RoomSpellTick, null, RoomSpellTimerInterval, RoomSpellTimerInterval);
         _combatTimer = new Timer(CombatTick, null, CombatTickInterval, CombatTickInterval);
+        StartPollPump();
         StartPlayerWriteBehind();
         StartSpawnBubbleRefresh();
         StartRealmBus();
@@ -37,6 +38,7 @@ public partial class GameWorld
         _slowTimer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
         _combatTimer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
         _roomSpellTimer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
+        _pollPumpTimer?.Change(System.Threading.Timeout.Infinite, System.Threading.Timeout.Infinite);
     }
 
     public void ResumeWorldTickTimersForTests()
@@ -46,26 +48,30 @@ public partial class GameWorld
         _slowTimer?.Change(SlowTickInterval, SlowTickInterval);
         _combatTimer?.Change(CombatTickInterval, CombatTickInterval);
         _roomSpellTimer?.Change(RoomSpellTimerInterval, RoomSpellTimerInterval);
+        _pollPumpLastTimestamp = Stopwatch.GetTimestamp();
+        _pollPumpTimer?.Change(PollPumpIntervalMilliseconds, PollPumpIntervalMilliseconds);
     }
 
     // Manual-clock hooks mirroring the three independent stock timers. Each advances only its own
-    // tick body, so a test drives exactly the cadence the behavior under test lives on.
+    // tick body, so a test drives exactly the cadence the behavior under test lives on. Each manual tick
+    // also runs its whole monster sweep, as a board busy enough to finish every sweep inside one tick
+    // would (GameWorld.MonsterSweeps) — the real timers get the player-paced sweep.
     public void AdvanceFastTicksForTests(int count)
     {
         for (int index = 0; index < count; index++)
-            FastTick(null);
+            FastTick(CompleteMonsterSweepForTests);
     }
 
     public void AdvanceMediumTicksForTests(int count)
     {
         for (int index = 0; index < count; index++)
-            MediumTick(null);
+            MediumTick(CompleteMonsterSweepForTests);
     }
 
     public void AdvanceSlowTicksForTests(int count)
     {
         for (int index = 0; index < count; index++)
-            SlowTick(null);
+            SlowTick(CompleteMonsterSweepForTests);
     }
 
     private int GetEvilPointForgivenessCycleTicks()
@@ -289,20 +295,28 @@ public partial class GameWorld
         if (System.Threading.Interlocked.Exchange(ref _fastTickInProgress, 1) == 1)
             return;
 
-        try { RunGatedTickBody("tick:fast", FastTickImpl); }
+        bool completeMonsterSweep = ReferenceEquals(state, CompleteMonsterSweepForTests);
+        try { RunGatedTickBody("tick:fast", () => FastTickImpl(completeMonsterSweep)); }
         finally
         {
             System.Threading.Volatile.Write(ref _fastTickInProgress, 0);
         }
     }
 
-    private void FastTickImpl()
+    private void FastTickImpl(bool completeMonsterSweep)
     {
         foreach (var player in _onlinePlayers.Values)
         {
             ProcessRestRegenTick(player);
             ProcessMeditateRegenTick(player);
         }
+
+        lock (_monsterLock)
+        {
+            KickMonsterSweep(MonsterSweepKind.Fast, completeMonsterSweep);
+            ResolveSweepKills();
+        }
+        AnnounceSweepMovements();
     }
 
     // Slow background pass (30s): natural HP/mana regen, poison, evil-point forgiveness.
@@ -311,14 +325,15 @@ public partial class GameWorld
         if (System.Threading.Interlocked.Exchange(ref _slowTickInProgress, 1) == 1)
             return;
 
-        try { RunGatedTickBody("tick:slow", SlowTickImpl); }
+        bool completeMonsterSweep = ReferenceEquals(state, CompleteMonsterSweepForTests);
+        try { RunGatedTickBody("tick:slow", () => SlowTickImpl(completeMonsterSweep)); }
         finally
         {
             System.Threading.Volatile.Write(ref _slowTickInProgress, 0);
         }
     }
 
-    private void SlowTickImpl()
+    private void SlowTickImpl(bool completeMonsterSweep)
     {
         _slowTickCount++;
         var now = DateTime.UtcNow;
@@ -451,6 +466,19 @@ public partial class GameWorld
         if (_slowTickCount % GroundStatePersistSlowTicks == 0)
             PersistRoomGroundState();
 
+        // The monsters' slow update (regen, poison) — a new slow cycle and a step of the slow sweep — and
+        // stock's slow-tick POLLRATE nudge from the background save's writes. Every SECBUFF (300 s) the
+        // background save is re-armed and stepped.
+        lock (_monsterLock)
+        {
+            KickMonsterSweep(MonsterSweepKind.Slow, completeMonsterSweep);
+            ResolveSweepKills();
+            AdjustPollRateFromSaveWrites();
+            if (_slowTickCount % SaveBufferSlowTicks == 0)
+                KickSaveSweep();
+        }
+        AnnounceSweepMovements();
+
         // Replenish finite shop stock on the slow tick.
         ProcessShopRestocks(now);
 
@@ -577,14 +605,15 @@ public partial class GameWorld
             return;
         }
 
-        try { RunGatedTickBody("tick:medium", MediumTickImpl); }
+        bool completeMonsterSweep = ReferenceEquals(state, CompleteMonsterSweepForTests);
+        try { RunGatedTickBody("tick:medium", () => MediumTickImpl(completeMonsterSweep)); }
         finally
         {
             System.Threading.Volatile.Write(ref _mediumTickInProgress, 0);
         }
     }
 
-    private void MediumTickImpl()
+    private void MediumTickImpl(bool completeMonsterSweep)
     {
         _mediumTickCount++;
         bool profileTick = GameDiagnostics.WorldTickProfilingEnabled;
@@ -615,39 +644,9 @@ public partial class GameWorld
             if (profileTick)
                 phaseStart = Stopwatch.GetTimestamp();
 
-            List<MonsterInstance>? upkeepKills = null;
             foreach (var kvp in _roomMonsters)
-            {
                 foreach (var monster in kvp.Value)
-                {
                     ProcessMonsterKnockdownTick(monster);
-
-                    if (!monster.IsDead && monster.ActiveSpells.Count > 0)
-                    {
-                        // Apply over-time spell effects FIRST, then age the
-                        // slots (mirrors the player order in ProcessActiveSpellUpkeep). A drain death is
-                        // deferred — skip the rest of this monster's upkeep.
-                        if (monster.TickSpellUpkeepEffects(Database))
-                        {
-                            (upkeepKills ??= new List<MonsterInstance>()).Add(monster);
-                            continue;
-                        }
-                        monster.TickActiveSpells(Database);
-                    }
-
-                    // HP regen by per-monster rate, clamped to maxHP,
-                    // once per fixed slow-update cycle (NOT every tick — see MonsterHpRegenIntervalTicks).
-                    monster.TickHpRegen(MonsterHpRegenIntervalTicks);
-
-                    // Drain monster poison on the same slow pass. Defer
-                    // any resulting death until after this enumeration — RemoveDeadMonster mutates the list.
-                    if (monster.TickPoison(MonsterHpRegenIntervalTicks))
-                        (upkeepKills ??= new List<MonsterInstance>()).Add(monster);
-                }
-            }
-            if (upkeepKills != null)
-                foreach (var monster in upkeepKills)
-                    KillMonsterFromUpkeep(monster);
             if (profileTick)
                 monsterBuffMs = MarkPhase(ref phaseStart);
 
@@ -677,15 +676,16 @@ public partial class GameWorld
             if (profileTick)
                 deadMonsterMs = MarkPhase(ref phaseStart);
 
-            // The medium background pass runs the monster update on EVERY medium tick
-            // (3s), and that pass resets the realm-wide 3-attempt wander budget and rolls
-            // ambient wander. Our medium tick is also 3s, so wander must run every tick -- the old %5
-            // gate made roaming 5x too sparse (guards never seen entering/leaving, no "You hear
-            // movement..." cues). Unlike room spells, monster updates are NOT every-other-gated.
-            // Monsters the previous tick's exit traps killed are reaped here, before this tick moves
-            // anything — matching the monster update, which opens with a dead-monster reap.
+            // The medium tick resets the realm-wide 3-attempt wander budget and re-arms/steps the
+            // medium monster sweep: active-spell upkeep and ambient wander happen when the sweep reaches
+            // each monster's buffer slot, at a pace set by the players in the game
+            // (GameWorld.MonsterSweeps). Monsters the previous tick's exit traps killed are reaped
+            // here, before this tick moves anything — matching the monster update, which opens with a
+            // dead-monster reap.
             ReapExitTrapKilledMonsters();
-            movementAnnouncements = ProcessMonsterMovement();
+            KickMonsterSweep(MonsterSweepKind.Medium, completeMonsterSweep);
+            ResolveSweepKills();
+            movementAnnouncements = TakeSweepMovementAnnouncements();
             if (profileTick)
                 movementMs = MarkPhase(ref phaseStart);
 
@@ -709,8 +709,6 @@ public partial class GameWorld
         // Player-pets: advance the follow-abandon counter for separated pets and let in-room pets
         // assist their owner against hostile monsters (faithful monster-vs-monster slice).
         ProcessPlayerPetsTick(now);
-        // Hostile locks: the same counter, for a wild monster that has lost the player it is locked on.
-        ProcessHostileLockMisses();
 
         // Stock parity: the spawn driver runs on its own "Monster Generation Rate" timer
         // (in seconds), NOT every medium tick. Running it each 3s medium tick spawned ~5x too
@@ -2423,6 +2421,8 @@ public partial class GameWorld
         // event. See RestoreStaticPlacedGroundItems for the details (bug #228).
         int restoredPlaced = RestoreStaticPlacedGroundItems();
         ProcessGangHouseTax(now);
+        // Stock's nightly cleanup saves every buffer at once, so every monster's dirty byte is cleared.
+        ClearAllMonsterDirtyFlags();
 
         Console.WriteLine($"Cleanup complete: {recharged} items recharged, {deletedGround} ground items deleted, {hiddenGround} hidden, {restoredPlaced} placed items restored.");
         foreach (var player in GetAllOnlinePlayers())

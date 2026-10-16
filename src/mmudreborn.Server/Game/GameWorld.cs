@@ -660,15 +660,6 @@ public partial class GameWorld : IBbsDoorContext
     // Evil-point forgiveness (a mmudreborn feature) runs on the 30s slow tick, aligned with the
     // stock evil-timer decrement on the slow pass. 2 slow ticks = 60s = one cycle minute.
     private const int SlowTicksPerMinute = 2;
-    // The slow monster update regenerates a monster's HP by its per-monster rate
-    // (HPRegen) once per global "slow" cycle, NOT every world tick. The
-    // slow updater round-robins exactly one monster slot per slow tick, so every
-    // monster is visited once per full pass over the slot table — a fixed, world-wide cadence
-    // independent of the individual monster (only the HPRegen *amount* varies). Megamud surfaces
-    // this cadence as e.g. "Regens: 90 HPs every 90 seconds [18 rounds]" (chimera, HPRegen=90).
-    // Monster regen runs on the medium tick (3s), so 90s = 30 medium ticks. Applying HPRegen every
-    // tick (the prior behavior) healed ~30x too fast; we gate it to one application per interval.
-    private const int MonsterHpRegenIntervalTicks = 30;
 
     public GameWorld(IGameDatabase database, IPlayerRepository playerRepo, IBbsUserRepository? bbsUserRepo = null, IBbsCommandDispatcher? bbsCommandDispatcher = null)
     {
@@ -1529,7 +1520,6 @@ public partial class GameWorld : IBbsDoorContext
                     // poison it died with, and not a charm bond (a charmed primary killed at home must not
                     // come back already serving its old owner).
                     deadNpc.PoisonLevel = 0;
-                    deadNpc.PoisonCooldownTicks = 0;
                     deadNpc.PlayerOwnerName = null;
                     deadNpc.IsCharmFresh = false;
                     deadNpc.FollowAbandonTicks = 0;

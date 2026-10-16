@@ -205,142 +205,92 @@ public partial class GameWorld
     public DateTime? GetNextRoomSpawnDeadline(int mapNumber, int roomNumber)
         => GetRoomLairSpawnDeadline(mapNumber, roomNumber);
 
-    private List<MonsterMovementAnnouncement> ProcessMonsterMovement()
+    // One monster's ambient wander, decided when the medium sweep reaches its slot (GameWorld.MonsterSweeps).
+    // The medium update throttles ambient wander to 3 rolled move-attempts realm-wide per medium tick, so
+    // roaming stays sparse — except for a Guard (Group 5) that is "dirty": it moves past the spent budget.
+    // Because the sweep visits monsters by buffer slot, which monsters win the budget never depends on the
+    // room they stand in (visiting room by room let the last-visited room of a closed area soak up every
+    // wanderer — the 15 storm giants of bug #256).
+    private void TryWanderMonster(MonsterInstance monster, List<MonsterMovementAnnouncement> announcements)
     {
-        var movers = new List<(MonsterInstance Monster, (int Map, int Room) FromKey, RoomExitDefinition Exit, (int Map, int Room) To)>();
-        var announcements = new List<MonsterMovementAnnouncement>();
+        if (monster.IsDead) return;
+        if (monster.IsPermanentNPC || IsRoomBoundMonster(monster.Template)) return;
+        // A monster with a locked pursuit target chases (the pursuit path); it doesn't ambient-wander.
+        if (monster.HasLockedTarget) return;
+        if (IsMonsterMovementSkipped(monster)) return;
 
-        // The medium monster update throttles ambient wander to 3 rolled move-attempts realm-wide per
-        // medium tick, so roaming stays sparse. A Guard (Group 5) may move past the
-        // budget when it is "dirty" (recently changed), so it is tracked separately from the cap.
-        int wanderBudget = 0;
-        const int WanderBudgetPerTick = 3;
+        // Monster movement hard-blocks Stationary (Type 3) from relocating at all.
+        if (monster.Template.Type == 3) return;
 
-        // Snapshot first: MoveMonster mutates _roomMonsters, so we can't relocate mid-iteration. The
-        // wander DECISION (Group eligibility, the aggression roll, and the budget spend) happens here,
-        // faithfully; the chosen relocation is applied in the second loop. Candidates are visited in
-        // monster-slot order, not room order — see GetRoomMonstersInSlotOrder.
-        foreach (var kvp in GetRoomMonstersInSlotOrder())
+        // Ambient-wander ELIGIBILITY keys on the GROUP/class field, NOT the
+        // Solo/Leader/Follower/Stationary Type: Group 0 and 2 never wander; Guard (5) patrols with
+        // priority and NO aggression roll; every other group rolls genrdn(0,100) < (100 - aggression)/2
+        // — i.e. LOW-aggression monsters wander MORE, and a 100-aggression lurker never ambient-wanders.
+        int group = monster.Template.Group;
+        if (group == 0 || group == 2) return;
+
+        var fromKey = (Map: monster.MapNumber, Room: monster.RoomNumber);
+
+        // A monster that has prey to fight in its room stays and bites rather than strolling off.
+        // (Stock reaches the same result via the in-combat flag once aggro engages; our aggro is
+        // command-driven, so we check for an engageable target directly to avoid mobs abandoning
+        // a standing player before the player acts.)
+        if (MonsterHasAttackTargetInRoom(monster, fromKey)) return;
+
+        bool guard = group == GuardMonsterGroup;
+        if (guard)
         {
-            foreach (var monster in kvp.Value)
-            {
-                if (monster.IsDead) continue;
-                if (monster.IsPermanentNPC || IsRoomBoundMonster(monster.Template)) continue;
-                // A monster with a locked pursuit target chases (the pursuit path); it doesn't ambient-wander.
-                if (monster.HasLockedTarget) continue;
-                if (IsMonsterMovementSkipped(monster)) continue;
-
-                // Monster movement hard-blocks Stationary (Type 3) from relocating at all.
-                if (monster.Template.Type == 3) continue;
-
-                // Ambient-wander ELIGIBILITY keys on the GROUP/class field, NOT the
-                // Solo/Leader/Follower/Stationary Type: Group 0 and 2 never wander; Guard (5) patrols with
-                // priority and NO aggression roll; every other group rolls genrdn(0,100) < (100 - aggression)/2
-                // — i.e. LOW-aggression monsters wander MORE, and a 100-aggression lurker never ambient-wanders.
-                int group = monster.Template.Group;
-                if (group == 0 || group == 2) continue;
-
-                // A monster that has prey to fight in its room stays and bites rather than strolling off.
-                // (Stock reaches the same result via the in-combat flag once aggro engages; our aggro is
-                // command-driven, so we check for an engageable target directly to avoid mobs abandoning
-                // a standing player before the player acts.)
-                if (MonsterHasAttackTargetInRoom(monster, kvp.Key)) continue;
-
-                if (wanderBudget >= WanderBudgetPerTick) continue;
-
-                bool guard = group == 5;
-                if (!guard)
-                {
-                    int wanderChance = (100 - monster.Template.FollowPercent) / 2;
-                    if (_rng.Next(0, 100) >= wanderChance) continue;   // genrdn(0,100) < chance
-                }
-
-                // Stock spends a budget slot on every rolled attempt, whether or not the move lands.
-                wanderBudget++;
-
-                // Group-formation anchor: a Follower (or subordinate Leader) does not move on its own
-                // while a dominant leader of its group shares the room — it waits to be dragged instead.
-                if (IsAnchoredToGroupLeader(monster)) continue;
-
-                var room = GetRoom(kvp.Key.Map, kvp.Key.Room);
-                if (room == null) continue;
-
-                // The random-direction pick is what an ambient wander sees, and it is
-                // NARROWER than "every exit": only types 0 (Normal), 2 (Key), 5 (Action), 7 (Door),
-                // 11 (Gate), 19 (BlockGuard) and 24 (SpellTrap) are candidates. A chase is not so
-                // limited — it follows the player's own exit — which is why the two paths pick
-                // differently but gate identically.
-                var chosenExit = PickWanderExit(room);
-                if (chosenExit == null) continue;
-
-                // Anti-backtrack: never immediately reverse the last move.
-                if (string.Equals(chosenExit.Direction, monster.LastMoveDirection, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var target = (Map: chosenExit.TargetMap, Room: chosenExit.TargetRoom);
-                var targetRoom = GetRoom(target.Map, target.Room);
-                if (targetRoom == null) continue;
-                // The gates every relocation shares: destination compatibility, the
-                // exit-type switch, and the hard 15-slot physical occupancy (NOT the lair MaxRegen cap
-                // — a monster may enter any room with a free slot).
-                if (!CanMonsterEnterRoomByMovement(monster.Template, targetRoom, chosenExit)) continue;
-                if (!CanMonsterTraverseExitType(monster.Template, chosenExit, GetLiveDoorLockState(chosenExit))) continue;
-                if (IsRoomPhysicallyFull(target)) continue;
-
-                movers.Add((monster, kvp.Key, chosenExit, target));
-            }
+            // A dirty guard (it has moved or changed since it was last saved) is not held by the budget.
+            if (!monster.IsDirty && _wanderBudget >= WanderBudgetPerMediumTick) return;
+        }
+        else
+        {
+            if (_wanderBudget >= WanderBudgetPerMediumTick) return;
+            int wanderChance = (100 - monster.Template.FollowPercent) / 2;
+            if (_rng.Next(0, 100) >= wanderChance) return;   // genrdn(0,100) < chance
         }
 
-        // `moved` tracks monsters already relocated this pass (a Leader's drag can move a monster that
-        // also picked its own exit above); such a monster is not moved twice.
-        var moved = new HashSet<MonsterInstance>();
-        foreach (var (monster, fromKey, exit, to) in movers)
-        {
-            if (moved.Contains(monster)) continue;
-            // The room/occupancy may have shifted since the decision (an earlier Leader dragged this
-            // monster, or filled the destination).
-            if (monster.MapNumber != fromKey.Map || monster.RoomNumber != fromKey.Room) continue;
+        // Stock spends a budget slot on every rolled attempt, whether or not the move lands — a dirty
+        // guard included.
+        _wanderBudget++;
 
-            // The mover fires the exit's trap on the crossing monster BEFORE it reaches for the
-            // destination slot, so a room that turns out to be full does not spare it.
-            ApplyMonsterExitTrap(monster, exit);
-            if (IsRoomPhysicallyFull(to)) continue;
+        // Group-formation anchor: a Follower (or subordinate Leader) does not move on its own
+        // while a dominant leader of its group shares the room — it waits to be dragged instead.
+        if (IsAnchoredToGroupLeader(monster)) return;
 
-            moved.Add(monster);
-            announcements.Add(MoveMonster(monster, fromKey, to, exit.Direction));
+        var room = GetRoom(fromKey.Map, fromKey.Room);
+        if (room == null) return;
 
-            // A Leader pulls its group along in the same direction (the drag).
-            DragGroupFollowers(monster, fromKey, to, exit, moved, announcements);
-        }
+        // The random-direction pick is what an ambient wander sees, and it is
+        // NARROWER than "every exit": only types 0 (Normal), 2 (Key), 5 (Action), 7 (Door),
+        // 11 (Gate), 19 (BlockGuard) and 24 (SpellTrap) are candidates. A chase is not so
+        // limited — it follows the player's own exit — which is why the two paths pick
+        // differently but gate identically.
+        var chosenExit = PickWanderExit(room);
+        if (chosenExit == null) return;
 
-        return announcements;
-    }
+        // Anti-repeat: never move in the same direction as the last move (cleared by the slow update).
+        if (string.Equals(chosenExit.Direction, monster.LastMoveDirection, StringComparison.OrdinalIgnoreCase))
+            return;
 
-    // Stock's medium pass walks its active-monster buffer by SLOT — a position each monster keeps for its
-    // whole life — so the 3-attempt wander budget goes to the same monsters wherever they stand. Visiting
-    // monsters room by room instead (in our room dictionary's hash order) handed the budget to whichever
-    // rooms came first: their monsters moved every tick, while a room late in the order almost never let
-    // anyone leave. Wanderers drained into the last-visited room of each closed-off area until all 15 of
-    // its slots were full — 15 storm giants in the Storm Fortress waiting room 16/1183 (bug #256).
-    // Monsters come out in slot order; neighbours in that order that share a room are grouped, so the
-    // caller still sees (room, monsters) pairs.
-    private List<KeyValuePair<(int Map, int Room), List<MonsterInstance>>> GetRoomMonstersInSlotOrder()
-    {
-        var bySlot = _roomMonsters
-            .SelectMany(kvp => kvp.Value.Select(monster => (kvp.Key, Monster: monster)))
-            .OrderBy(entry => entry.Monster.BufferSlot)
-            .ToList();
+        var target = (Map: chosenExit.TargetMap, Room: chosenExit.TargetRoom);
+        var targetRoom = GetRoom(target.Map, target.Room);
+        if (targetRoom == null) return;
+        // The gates every relocation shares: destination compatibility, the
+        // exit-type switch, and the hard 15-slot physical occupancy (NOT the lair MaxRegen cap
+        // — a monster may enter any room with a free slot).
+        if (!CanMonsterEnterRoomByMovement(monster.Template, targetRoom, chosenExit)) return;
+        if (!CanMonsterTraverseExitType(monster.Template, chosenExit, GetLiveDoorLockState(chosenExit))) return;
 
-        var runs = new List<KeyValuePair<(int Map, int Room), List<MonsterInstance>>>();
-        foreach (var (key, monster) in bySlot)
-        {
-            if (runs.Count > 0 && runs[^1].Key == key)
-                runs[^1].Value.Add(monster);
-            else
-                runs.Add(new(key, [monster]));
-        }
+        // The mover fires the exit's trap on the crossing monster BEFORE it reaches for the
+        // destination slot, so a room that turns out to be full does not spare it.
+        ApplyMonsterExitTrap(monster, chosenExit);
+        if (IsRoomPhysicallyFull(target)) return;
 
-        return runs;
+        announcements.Add(MoveMonster(monster, fromKey, target, chosenExit.Direction));
+
+        // A Leader pulls its group along in the same direction (the drag).
+        DragGroupFollowers(monster, fromKey, target, chosenExit, [monster], announcements);
     }
 
     // True when the monster has someone to fight in its current room: a player it has already engaged
@@ -368,13 +318,27 @@ public partial class GameWorld
     }
 
     // Test seam: would this monster stay to fight (and thus skip self-wandering) given who is in its
-    // current room right now? Mirrors the guard ProcessMonsterMovement applies to each wander candidate.
+    // current room right now? Mirrors the guard TryWanderMonster applies to each wander candidate.
     internal bool MonsterWouldStayToFightForTests(MonsterInstance monster)
         => MonsterHasAttackTargetInRoom(monster, (monster.MapNumber, monster.RoomNumber));
 
-    // Test seam: run one medium-tick ambient-wander pass (applies moves + drags), so tests can drive
-    // wander/anchor/drag without the full tick.
-    internal void RunMonsterWanderForTests() => ProcessMonsterMovement();
+    // Test seam: one full medium-tick ambient-wander pass — a fresh budget, every monster in slot order
+    // (applies moves + drags) — so tests can drive wander/anchor/drag without the full tick.
+    internal void RunMonsterWanderForTests()
+    {
+        lock (_monsterLock)
+        {
+            RefreshMonsterBufferSlots();
+            _wanderBudget = 0;
+            var discarded = new List<MonsterMovementAnnouncement>();
+            for (int slot = 0; slot < _monsterBufferSlots.Length; slot++)
+            {
+                var monster = GetLiveMonsterInSlot(slot);
+                if (monster != null)
+                    TryWanderMonster(monster, discarded);
+            }
+        }
+    }
 
     // Group-formation ANCHOR (self-initiated moves only): a Follower,
     // or a subordinate Leader, does not move on its own while a Leader of its own group (same GroupMatch,

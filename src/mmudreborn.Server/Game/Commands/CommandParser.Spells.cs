@@ -1175,7 +1175,7 @@ public partial class CommandParser
 
         // A poison spell writes the monster's poison level to
         // max(current, magnitude) on top of the instant damage; the slow tick then drains it each
-        // slow pass (TickPoison). Mirrors the player-target poison apply (max-merge, no monster cure).
+        // slow update (ApplySlowUpdate). Mirrors the player-target poison apply (max-merge, no monster cure).
         if (!targetMonster.IsDead && spell.Abilities.ContainsKey(PoisonSpellAbilityId))
         {
             int poisonMagnitude = RollSpellLevelScaledAmount(spell);
@@ -1446,7 +1446,7 @@ public partial class CommandParser
     // the monster spell-upkeep cases: 1 disease + 8 drain (HP -= magnitude),
     // 18 heal-over-time (HP += magnitude), 11 energy regen, 20 anti-poison drain. A duration spell
     // carrying any of these needs a timed slot so the effect ticks. (Poison 19 is handled separately
-    // by PoisonLevel/TickPoison on the SLOW pass — not listed here, matching the cadence split.)
+    // by PoisonLevel/ApplySlowUpdate on the SLOW update — not listed here, matching the cadence split.)
     private static readonly int[] MonsterUpkeepEffectAbilities = [1, 8, 18, 11, 20];
     private static bool SpellHasMonsterUpkeepEffect(GameSpell spell)
         => Array.Exists(MonsterUpkeepEffectAbilities, spell.Abilities.ContainsKey);

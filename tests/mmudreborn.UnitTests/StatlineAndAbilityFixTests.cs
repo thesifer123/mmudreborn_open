@@ -84,7 +84,7 @@ public sealed class StatlineAndAbilityFixTests
     }
 
     [Fact]
-    public void Monster_poison_drains_hp_once_per_interval()
+    public void Monster_poison_drains_hp_once_per_slow_update()
     {
         var monster = new MonsterInstance
         {
@@ -94,15 +94,11 @@ public sealed class StatlineAndAbilityFixTests
             PoisonLevel = 8,
         };
 
-        Assert.True(monster.TickPoison(30) == false); // first drain, not dead
+        monster.ApplySlowUpdate(); // first drain, not dead
+        Assert.False(monster.IsDead);
         Assert.Equal(42, monster.CurrentHP);
 
-        // Subsequent ticks within the interval do not drain again.
-        for (int i = 0; i < 29; i++)
-            monster.TickPoison(30);
-        Assert.Equal(42, monster.CurrentHP);
-
-        monster.TickPoison(30); // next interval boundary
+        monster.ApplySlowUpdate(); // next slow update
         Assert.Equal(34, monster.CurrentHP);
     }
 
@@ -117,7 +113,7 @@ public sealed class StatlineAndAbilityFixTests
             PoisonLevel = 8,
         };
 
-        Assert.True(monster.TickPoison(30)); // drain kills the monster
+        monster.ApplySlowUpdate(); // drain kills the monster
         Assert.True(monster.IsDead);
     }
 
