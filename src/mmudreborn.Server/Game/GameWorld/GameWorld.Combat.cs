@@ -408,14 +408,10 @@ public partial class GameWorld
     // reaches the monster (GameWorld.MonsterSweeps).
     private void ProcessHostileLockMiss(MonsterInstance monster)
     {
-        // Exact name only — the slot holds a full name, and a prefix match could hand the lock to a
-        // different, longer-named player while its real target is offline.
-        if (_onlinePlayers.TryGetValue(monster.LockedTargetName!, out var target)
-            && target.CurrentMapNumber == monster.MapNumber
-            && target.CurrentRoomNumber == monster.RoomNumber)
-        {
+        // The fast update first tries to close in on the locked player (TryChaseLockedPlayer); only a
+        // failed attempt — or a player who is offline — is a miss.
+        if (!TryChaseLockedPlayer(monster))
             return;
-        }
 
         monster.IsDirty = true;   // the miss count is saved with the record
         if (++monster.FollowAbandonTicks > PetFollowAbandonLimit)

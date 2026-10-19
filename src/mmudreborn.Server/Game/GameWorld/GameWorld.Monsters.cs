@@ -214,13 +214,8 @@ public partial class GameWorld
     private void TryWanderMonster(MonsterInstance monster, List<MonsterMovementAnnouncement> announcements)
     {
         if (monster.IsDead) return;
-        if (monster.IsPermanentNPC || IsRoomBoundMonster(monster.Template)) return;
         // A monster with a locked pursuit target chases (the pursuit path); it doesn't ambient-wander.
         if (monster.HasLockedTarget) return;
-        if (IsMonsterMovementSkipped(monster)) return;
-
-        // Monster movement hard-blocks Stationary (Type 3) from relocating at all.
-        if (monster.Template.Type == 3) return;
 
         // Ambient-wander ELIGIBILITY keys on the GROUP/class field, NOT the
         // Solo/Leader/Follower/Stationary Type: Group 0 and 2 never wander; Guard (5) patrols with
@@ -254,10 +249,6 @@ public partial class GameWorld
         // guard included.
         _wanderBudget++;
 
-        // Group-formation anchor: a Follower (or subordinate Leader) does not move on its own
-        // while a dominant leader of its group shares the room — it waits to be dragged instead.
-        if (IsAnchoredToGroupLeader(monster)) return;
-
         var room = GetRoom(fromKey.Map, fromKey.Room);
         if (room == null) return;
 
@@ -272,6 +263,19 @@ public partial class GameWorld
         // Anti-repeat: never move in the same direction as the last move (cleared by the slow update).
         if (string.Equals(chosenExit.Direction, monster.LastMoveDirection, StringComparison.OrdinalIgnoreCase))
             return;
+
+        // The mover itself (rooted / slowed / dazed — the rise line belongs to the fight and the fast update).
+        if (IsHeldInPlaceByMover(monster)) return;
+
+        // Group-formation anchor: a Follower (or subordinate Leader) does not move on its own
+        // while a dominant leader of its group shares the room — it waits to be dragged instead.
+        if (IsAnchoredToGroupLeader(monster)) return;
+
+        // A Stationary (Type 3) monster never relocates — but the mover only finds that out here, after
+        // its attempt has spent the budget and counted its daze down. Our room-pinned NPCs (a local rule,
+        // no stock counterpart) stay put at the same point.
+        if (monster.Template.Type == 3) return;
+        if (monster.IsPermanentNPC || IsRoomBoundMonster(monster.Template)) return;
 
         var target = (Map: chosenExit.TargetMap, Room: chosenExit.TargetRoom);
         var targetRoom = GetRoom(target.Map, target.Room);
@@ -494,77 +498,166 @@ public partial class GameWorld
     private const int MonsterRootedAbilityId = 74;
     private const int MonsterMovementSlowAbilityId = 68;
 
-    private bool IsMonsterMovementSkipped(MonsterInstance monster)
+    // The start of stock's mover, for a wander and a chase alike: a rooted monster stays put, a slowed
+    // one half the time, and a smash-dazed one counts its daze down (silently) instead of moving. True when
+    // the monster is held where it is.
+    private bool IsHeldInPlaceByMover(MonsterInstance monster)
     {
-        if (monster.IsKnockedDown)
-            return true;
-
         if (monster.GetEffectiveAbility(MonsterRootedAbilityId) != 0)
             return true;
 
-        return monster.GetEffectiveAbility(MonsterMovementSlowAbilityId) != 0 && _rng.Next(100) <= 49;
+        if (monster.GetEffectiveAbility(MonsterMovementSlowAbilityId) != 0 && _rng.Next(100) <= 49)
+            return true;
+
+        if (monster.IsKnockedDown)
+        {
+            monster.TickKnockdown();
+            return true;
+        }
+
+        return false;
     }
 
-    public List<MonsterInstance> ResolveMonsterPursuit(Player player, Room fromRoom, RoomExitDefinition exit, IReadOnlyList<MonsterInstance> attackers)
+    // The immediate follow: once a player has walked out, every monster in the room they left that is
+    // locked onto them rolls its FollowPercent and, on a pass, takes the same exit through the mover.
+    // Stock picks these by the lock (its target-name slot holds the player's name), not by who happened to
+    // be swinging. One that fails or is held keeps trying on its fast updates (TryChaseLockedPlayer).
+    public List<MonsterInstance> ResolveMonsterPursuit(Player player, Room fromRoom, RoomExitDefinition exit)
     {
         var followed = new List<MonsterInstance>();
-        if (attackers.Count == 0)
-            return followed;
-
         var destinationRoom = GetRoom(player.CurrentMapNumber, player.CurrentRoomNumber);
         if (destinationRoom == null)
             return followed;
 
         var from = (fromRoom.MapNumber, fromRoom.RoomNumber);
-        var to = (destinationRoom.MapNumber, destinationRoom.RoomNumber);
+        List<MonsterInstance> lockedOn;
+        lock (_monsterLock)
+        {
+            lockedOn = _roomMonsters.TryGetValue(from, out var list)
+                ? list.Where(m => !m.IsDead && !m.HasPlayerOwner && m.IsLockedOnTarget(player.Name)).ToList()
+                : [];
+        }
 
-        // A Leader's drag can move a monster that is itself in the attacker list; `moved` stops it being
-        // pursued a second time.
+        // A Leader's drag can move a monster that is itself locked on; `moved` stops it following twice.
         var moved = new HashSet<MonsterInstance>();
-        foreach (var monster in attackers)
+        foreach (var monster in lockedOn)
         {
             if (moved.Contains(monster))
                 continue;
 
-            if (!CanMonsterPursueThroughExit(monster, player, from, destinationRoom, exit))
+            if (_rng.Next(0, 100) >= monster.Template.FollowPercent)   // genrdn(0,100) < FollowPercent
                 continue;
 
-            if (IsMonsterMovementSkipped(monster))
-                continue;
-
-            // Group-formation anchor: a Follower (or subordinate Leader) won't chase independently while
-            // its group leader is present — it is dragged along when the leader moves, not before.
-            if (IsAnchoredToGroupLeader(monster))
-                continue;
-
-            if (_rng.Next(100) >= monster.Template.FollowPercent)
-                continue;
-
-            // The chase roll has passed, so the mover is entered — and its exit-type switch fires the
-            // exit's trap on the chaser BEFORE the destination slot is claimed. A monster that declined
-            // to chase never reaches this, and a full destination does not spare one that did.
-            ApplyMonsterExitTrap(monster, exit);
-
-            // Gated only by the hard 15-slot physical occupancy: a chased monster may enter any
-            // room with a free slot. This bounds a kited mob-train (the crash vector) without letting
-            // the destination's MaxRegen block legitimate pursuit.
-            if (IsRoomPhysicallyFull(to))
-                continue;
-
-            moved.Add(monster);
-            MoveMonsterPursuit(monster, player, from, to, exit.Direction);
-            followed.Add(monster);
-
-            // A Leader drags its group along the chase. Dragged members relocate
-            // via the generic MoveMonster path, so announce their movement lines here.
             var dragAnnouncements = new List<MonsterMovementAnnouncement>();
-            var draggedMonsters = DragGroupFollowers(monster, from, to, exit, moved, dragAnnouncements);
+            var movedHere = TryChaseThroughExit(monster, player, from, destinationRoom, exit, moved, dragAnnouncements, broadcastChaser: true);
             if (dragAnnouncements.Count > 0)
                 AnnounceMonsterMovements(dragAnnouncements);
-            followed.AddRange(draggedMonsters);
+            followed.AddRange(movedHere);
         }
 
         return followed;
+    }
+
+    // The mover for a chase — stock's mover with no leader flag. A rooted, slowed or dazed monster
+    // is held (IsHeldInPlaceByMover); a follower anchored to its leader, a Stationary monster, an incompatible room or exit, or a full room stop it;
+    // the exit's trap fires on it before it claims a slot. Returns everything that moved (the chaser and
+    // any group it dragged), empty if it stayed. The chaser's own lines are broadcast at once when asked
+    // (the immediate follow); otherwise they join `announcements` with the dragged members'.
+    private List<MonsterInstance> TryChaseThroughExit(MonsterInstance monster, Player player, (int Map, int Room) from,
+        Room destinationRoom, RoomExitDefinition exit, HashSet<MonsterInstance> moved,
+        List<MonsterMovementAnnouncement> announcements, bool broadcastChaser)
+    {
+        if (IsHeldInPlaceByMover(monster))
+            return [];
+
+        // Group-formation anchor: a Follower (or subordinate Leader) won't chase independently while
+        // its group leader is present — it is dragged along when the leader moves, not before.
+        if (IsAnchoredToGroupLeader(monster))
+            return [];
+
+        if (!CanMonsterPursueThroughExit(monster, player, from, destinationRoom, exit))
+            return [];
+
+        // The exit-type switch fires the exit's trap on the chaser BEFORE the destination slot is
+        // claimed, so a full destination does not spare it.
+        ApplyMonsterExitTrap(monster, exit);
+
+        // Gated only by the hard 15-slot physical occupancy: a chased monster may enter any room with a
+        // free slot. This bounds a kited mob-train without letting the destination's MaxRegen block
+        // legitimate pursuit.
+        var to = (destinationRoom.MapNumber, destinationRoom.RoomNumber);
+        if (IsRoomPhysicallyFull(to))
+            return [];
+
+        moved.Add(monster);
+        if (broadcastChaser)
+            MoveMonsterPursuit(monster, player, from, to, exit.Direction);
+        else
+            announcements.Add(MoveMonster(monster, from, to, exit.Direction));
+
+        // A Leader drags its group along the chase.
+        var dragged = DragGroupFollowers(monster, from, to, exit, moved, announcements);
+        return [monster, .. dragged];
+    }
+
+    // The fast update's chase: a monster locked onto a player who is elsewhere tries to close in, one
+    // room at a time along the player's own trail. It only tries when the player is online, on the same
+    // map, has not just moved, and is visible to it (hidden or sneaking needs See Hidden), and only on a
+    // FollowPercent roll. Any of those failing, no trail back to the player from here, or the mover
+    // refusing, counts a miss. Sharing the room is neither. Returns true for a miss.
+    private bool TryChaseLockedPlayer(MonsterInstance monster)
+    {
+        // Exact name only — the slot holds a full name, and a prefix match could hand the lock to a
+        // different, longer-named player while its real target is offline.
+        if (!_onlinePlayers.TryGetValue(monster.LockedTargetName!, out var target))
+            return true;
+
+        if (target.CurrentMapNumber == monster.MapNumber && target.CurrentRoomNumber == monster.RoomNumber)
+            return false;
+
+        bool unseen = (target.IsHidden || target.IsSneaking)
+            && monster.GetEffectiveAbility(CombatEngine.SeeHiddenAbilityId) == 0;
+        if (unseen || target.MovedThisPulse || target.CurrentMapNumber != monster.MapNumber
+            || _rng.Next(0, 100) >= monster.Template.FollowPercent)
+        {
+            return true;
+        }
+
+        var from = (Map: monster.MapNumber, Room: monster.RoomNumber);
+        var room = GetRoom(from.Map, from.Room);
+        var exit = room == null ? null : FindExitAlongPlayerTrail(room, target);
+        var destinationRoom = exit == null ? null : GetRoom(exit.TargetMap, exit.TargetRoom);
+        if (exit == null || destinationRoom == null)
+            return true;
+
+        var moved = TryChaseThroughExit(monster, target, from, destinationRoom, exit, [], _sweepMovementAnnouncements, broadcastChaser: false);
+        return moved.Count == 0;
+    }
+
+    // Where the player went from here: find this room in the player's recent trail (newest first) and
+    // the exit from it to the room they entered next. Null when the player never passed through here
+    // recently.
+    private static RoomExitDefinition? FindExitAlongPlayerTrail(Room room, Player player)
+    {
+        var trail = player.MovementTrail;
+        if (trail == null)
+            return null;
+
+        for (int i = 1; i < trail.Count; i++)
+        {
+            if (trail[i] != (room.MapNumber, room.RoomNumber))
+                continue;
+
+            var next = trail[i - 1];
+            foreach (var exit in room.GetExitDefinitions().Values.OrderBy(def => def.DirectionIndex))
+            {
+                if (exit.HasDestination && exit.TargetRoom == next.Room)
+                    return exit;
+            }
+            return null;
+        }
+
+        return null;
     }
 
     private BackgroundGenerationStats ProcessBackgroundMonsterGeneration()

@@ -389,6 +389,22 @@ public class CombatEngine
     internal static bool IsSmashDefenseless(Player? p) => p is { KnockdownKind: KnockdownKind.Smash } && p.IsKnockedDown;
     internal static bool IsSmashDefenseless(MonsterInstance? m) => m is { KnockdownKind: KnockdownKind.Smash } && m.IsKnockedDown;
 
+    // The line a smash-dazed monster gets as it stands back up.
+    internal static string MonsterRisesFromSmashLine(MonsterInstance monster)
+        => $"{MudAnsi.BrightWhite}Slightly dazed the {monster.DisplayName} rises from the floor.{MudAnsi.Reset}";
+
+    // Stock's fighter set-up counts a smash-dazed monster's daze down once for every attack round it takes
+    // part in — its own round, or a player's round against it. When the count runs out it rises before the
+    // swings, which then land without the defenceless penalty; the line goes to the player in the fight
+    // and to the room. Returns that line, or null while it stays down.
+    internal static string? TickMonsterSmashDazeForRound(MonsterInstance monster)
+    {
+        if (monster.IsDead || !IsSmashDefenseless(monster))
+            return null;
+
+        return monster.TickKnockdown() ? MonsterRisesFromSmashLine(monster) : null;
+    }
+
     private static bool TryApplyPlayerSmashKnockdown(Player attacker, Player target, CombatResult result)
     {
         if (GetPlayerSmashKnockdownScore(attacker) <= GetPlayerSmashKnockdownScore(target))
@@ -2241,6 +2257,13 @@ public class CombatEngine
         // departing free attack and ongoing combat rounds, not merely the on-sight aggro decision.
         if (PlayerHoldsMonsterPacifier(monster.Template, player))
             return result;
+
+        string? riseLine = TickMonsterSmashDazeForRound(monster);
+        if (riseLine != null)
+        {
+            result.Messages.Add(riseLine);
+            result.RoomMessages.Add(riseLine);
+        }
 
         bool wasConscious = player.CurrentHP > 0;
         int playerAC = player.GetTotalAC() + player.PartyDefenceModifier;

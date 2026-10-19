@@ -643,6 +643,14 @@ public partial class CommandParser
         _player.IsSneaking = false;
         _player.IsHidden = false;
 
+        // A smash-dazed monster's daze counts down once per round fought against it, before the swings.
+        string? riseLine = CombatEngine.TickMonsterSmashDazeForRound(monster);
+        if (riseLine != null)
+        {
+            await SendCombatMessagesToCurrentPlayerAsync([riseLine]);
+            BroadcastCombatMessagesToRoom([riseLine]);
+        }
+
         // A spiked monster (ability 72) damages the player on each landing melee swing.
         var monsterRetaliation = CombatEngine.BuildRetaliationSources(monster, _world.Database);
 

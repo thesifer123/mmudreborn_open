@@ -644,9 +644,6 @@ public partial class GameWorld
             if (profileTick)
                 phaseStart = Stopwatch.GetTimestamp();
 
-            foreach (var kvp in _roomMonsters)
-                foreach (var monster in kvp.Value)
-                    ProcessMonsterKnockdownTick(monster);
             if (profileTick)
                 monsterBuffMs = MarkPhase(ref phaseStart);
 
@@ -742,6 +739,7 @@ public partial class GameWorld
             ProcessPlayerKnockdownTick(player);
             player.RecentMoveCount = 0;
             player.SneakedInThisTick = false;
+            player.MovedThisPulse = false;
             player.RecentlySpotted = false;
 
             // Unconscious players bleed / recover on the SLOW tick, not here.
@@ -2087,6 +2085,8 @@ public partial class GameWorld
         }
     }
 
+    // A smash-dazed monster's fast update counts its daze down (only monsters locked onto a player, or
+    // owned, get fast updates — GameWorld.MonsterSweeps); the rise is announced to the room.
     private void ProcessMonsterKnockdownTick(MonsterInstance monster)
     {
         // A dead monster never gets back up (its instance can linger — a Room.NPC primary waits in the
@@ -2101,7 +2101,7 @@ public partial class GameWorld
         if (kind == KnockdownKind.Smash)
         {
             BroadcastToRoom(monster.MapNumber, monster.RoomNumber,
-                $"{MudAnsi.BrightWhite}Slightly dazed the {monster.DisplayName} rises from the floor.{MudAnsi.Reset}",
+                CombatEngine.MonsterRisesFromSmashLine(monster),
                 reprompt: true);
         }
     }

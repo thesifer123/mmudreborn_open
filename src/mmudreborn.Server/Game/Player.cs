@@ -227,6 +227,18 @@ public class Player
         _movementTrail ??= new MovementTrail(MovementTrail.PlayerCapacity);
         _movementTrail.Record(mapNumber, roomNumber);
     }
+
+    // Stock's "moved this pulse" bit: set by every move, cleared by the next upkeep. A monster chasing on
+    // its fast update does not follow a player who has only just stepped (GameWorld.TryChaseLockedPlayer).
+    [JsonIgnore]
+    public bool MovedThisPulse { get; set; }
+
+    // A move into a room: extend the trail and set the moved-this-pulse bit.
+    public void RecordMove(int mapNumber, int roomNumber)
+    {
+        RecordMovementTrail(mapNumber, roomNumber);
+        MovedThisPulse = true;
+    }
     public int CriticalHitBonus { get; set; } = 0;
     // Names in this set are permanently sysop: access is granted unconditionally, cannot be
     // revoked, and auto-restores on character load even if the persisted bit is 0.
@@ -2665,6 +2677,7 @@ public class MonsterInstance
         KnockdownKind = kind;
         KnockdownTicksRemaining = duration;
         KnockdownDescriptiveMessageId = descriptiveMessageId;
+        IsDirty = true;
     }
 
     public bool TickKnockdown()
@@ -2672,6 +2685,7 @@ public class MonsterInstance
         if (!IsKnockedDown)
             return false;
 
+        IsDirty = true;
         KnockdownTicksRemaining--;
         if (KnockdownTicksRemaining > 0)
             return false;

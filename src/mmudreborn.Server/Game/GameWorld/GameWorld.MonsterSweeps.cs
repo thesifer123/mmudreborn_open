@@ -217,10 +217,14 @@ public partial class GameWorld
             _sweepKills.Add(monster);
     }
 
-    // Fast update: only for a monster locked onto a player — count a miss while it can't reach them, and
-    // give the lock up past the limit.
+    // Fast update: only for a monster locked onto a player or owned by one. A smash-dazed one counts its
+    // daze down; a hostile lock counts a miss while it can't reach its player, and lapses past the limit.
     private void FastUpdateMonster(MonsterInstance monster)
     {
+        if (!monster.HasLockedTarget && !monster.HasPlayerOwner)
+            return;
+
+        ProcessMonsterKnockdownTick(monster);
         if (monster.HasLockedTarget && !monster.HasPlayerOwner)
             ProcessHostileLockMiss(monster);
     }

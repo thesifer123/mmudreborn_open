@@ -317,7 +317,7 @@ public partial class CommandParser
         // Move player
         _player.CurrentMapNumber = destination.TargetMap;
         _player.CurrentRoomNumber = destination.TargetRoom;
-        _player.RecordMovementTrail(destination.TargetMap, destination.TargetRoom);
+        _player.RecordMove(destination.TargetMap, destination.TargetRoom);
         _player.IsResting = false;
         _player.IsMeditating = false;
         // A move sets the "moved this tick" bit; with sneaking it lets you hide
@@ -624,7 +624,7 @@ public partial class CommandParser
 
         _player.CurrentMapNumber = destination.TargetMap;
         _player.CurrentRoomNumber = destination.TargetRoom;
-        _player.RecordMovementTrail(destination.TargetMap, destination.TargetRoom);
+        _player.RecordMove(destination.TargetMap, destination.TargetRoom);
         ResolvePostTravelCombatState(_player, room, destination, departingMonsterAttackers);
         _world.NotifyPlayerEnteredRoom(_player);
         await HandleIndependentPartyTravelCleanupAsync(_player, disbandLeader: false);
@@ -730,7 +730,7 @@ public partial class CommandParser
 
             follower.CurrentMapNumber = exit.TargetMap;
             follower.CurrentRoomNumber = exit.TargetRoom;
-            follower.RecordMovementTrail(exit.TargetMap, exit.TargetRoom);
+            follower.RecordMove(exit.TargetMap, exit.TargetRoom);
             follower.IsResting = false;
             follower.IsMeditating = false;
             follower.IsHidden = false;
@@ -815,10 +815,10 @@ public partial class CommandParser
 
     private void ResolvePostTravelCombatState(Player player, Room fromRoom, RoomExitDefinition exit, IReadOnlyList<MonsterInstance> departingMonsterAttackers)
     {
-        if (departingMonsterAttackers.Count > 0)
+        // Everything locked onto the player rolls to follow, whether or not it was swinging this round.
+        var followedAttackers = _world.ResolveMonsterPursuit(player, fromRoom, exit);
+        if (departingMonsterAttackers.Count > 0 || followedAttackers.Count > 0)
         {
-            var followedAttackers = _world.ResolveMonsterPursuit(player, fromRoom, exit, departingMonsterAttackers);
-
             player.ReplaceIncomingMonsterAttackers(followedAttackers);
             player.CombatTarget = followedAttackers.FirstOrDefault();
         }
@@ -1420,6 +1420,7 @@ public partial class CommandParser
 
             follower.CurrentMapNumber = followerExit.TargetMap;
             follower.CurrentRoomNumber = followerExit.TargetRoom;
+            follower.RecordMove(followerExit.TargetMap, followerExit.TargetRoom);
             follower.IsResting = false;
             follower.IsMeditating = false;
             follower.IsHidden = false;
