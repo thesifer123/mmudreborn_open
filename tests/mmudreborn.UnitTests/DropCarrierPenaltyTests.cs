@@ -101,6 +101,31 @@ public sealed class DropCarrierPenaltyTests
         Assert.DoesNotContain(world.GetVisibleGroundItems(1, 1), entry => entry.ItemId == LoyalRingId);
     }
 
+    // Bug #257: a WORN +HP item (ability 88) the penalty strips takes its bonus off max AND current HP, as
+    // stock's item removal does before the hangup's closing kill check.
+    [Fact]
+    public void A_dropped_worn_hp_item_takes_its_hp_bonus_with_it()
+    {
+        const int VitalRingId = 502;
+        var (world, db) = NewWorld();
+        db.Items[VitalRingId] = new Item { Number = VitalRingId, Name = "a vital ring", Abilities = { [88] = 50 } };
+        world.SetDisconnectPenaltyLevel(GameWorld.DisconnectPenaltyHigh);
+        world.SetDisconnectPenaltyHpPercents(0, 0);   // no percentage loss: only the ring moves HP
+        world.SetDisconnectPenaltyMaxItemsDropped(5);
+
+        // 200 base + the ring's 50, as wearing it left them.
+        var player = NewPlayer("Vital", currentHp: 250, maxHp: 250);
+        player.Equipment["worn-1"] = VitalRingId;
+        player.EquipmentInstanceIds["worn-1"] = 3;
+        world.AddPlayer(player);
+
+        world.ApplyDropCarrierPenalty(player);
+
+        Assert.DoesNotContain(VitalRingId, player.Equipment.Values);
+        Assert.Equal(200, player.MaxHP);
+        Assert.Equal(200, player.CurrentHP);
+    }
+
     [Fact]
     public void The_item_budget_is_respected()
     {

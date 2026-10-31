@@ -196,6 +196,9 @@ public partial class GameWorld
 
                 player.Equipment.Remove(slot);
                 player.EquipmentInstanceIds.Remove(slot);
+                // Stock drops through its item-removal routine, which takes the worn item's +HP off max
+                // AND current HP before the closing kill check — so this can tip a player into death.
+                player.ApplyEquipInstantAbilities(item, equipping: false);
                 RemoveItemRuntimeState(instanceId);
             }
 

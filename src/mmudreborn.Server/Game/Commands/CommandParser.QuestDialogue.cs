@@ -2516,6 +2516,8 @@ public partial class CommandParser
         long equippedInstanceId = GetEquipmentInstanceId(equippedSlot, itemId);
         _player.Equipment.Remove(equippedSlot);
         _player.EquipmentInstanceIds.Remove(equippedSlot);
+        if (_world.Database.Items.TryGetValue(itemId, out var removedItem))
+            ApplyEquipInstantAbilities(removedItem, equipping: false);
         wasEquipped = true;
         RemoveLightStateIfNotCarried(equippedInstanceId);
         _world.RemoveItemRuntimeState(equippedInstanceId);

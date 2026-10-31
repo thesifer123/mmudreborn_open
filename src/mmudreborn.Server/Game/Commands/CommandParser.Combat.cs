@@ -1775,6 +1775,7 @@ public partial class CommandParser
             {
                 _player.Equipment.Remove(match.EquipmentSlot!);
                 _player.EquipmentInstanceIds.Remove(match.EquipmentSlot!);
+                ApplyEquipInstantAbilities(match.Item, equipping: false);
                 RecalcEquipment();
             }
             else
@@ -3302,6 +3303,9 @@ public partial class CommandParser
             // "Major Curse" both retain the item across death. Major
             // Curse items are still unequipped per Nightmare Redux notes -- they move to inventory.
             _world.Database.Items.TryGetValue(itemId, out var item);
+            // Death unequips EVERY worn item, kept or dropped, so each one's +HP comes off (bug #257).
+            if (item != null)
+                ApplyEquipInstantAbilities(item, equipping: false);
             if (!isPermadeath && item != null && ItemIsRetainedOnDeath(item))
             {
                 _player.Inventory.Add(itemId);

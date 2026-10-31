@@ -543,6 +543,8 @@ public partial class CommandParser
         }
 
         _player.EquipmentInstanceIds.Remove(match.EquipmentSlot);
+        // Give/drop/sell/hide/destroy of a WORN item: reverse its +HP / spellbook grant like REMOVE does.
+        ApplyEquipInstantAbilities(match.Item, equipping: false);
         wasEquipped = true;
         return true;
     }
@@ -1768,29 +1770,12 @@ public partial class CommandParser
         _ => null,
     };
 
-    // Instant
-    // per-equip effects applied once on equip and reversed on unequip. Ability 88 adds flat max+current HP
-    // while worn; ability 160 grants (or purges) a spell in the spellbook. MaxHP is a stored, incremental
-    // field, so the delta persists through level-ups and saves (matching stock).
+    // Instant per-equip effects (ability 88 HP, 160 spellbook) — see Player.ApplyEquipInstantAbilities.
     private void ApplyEquipInstantAbilities(Item item, bool equipping)
         => ApplyEquipInstantAbilities(_player, item, equipping);
 
     private void ApplyEquipInstantAbilities(Player target, Item item, bool equipping)
-    {
-        int sign = equipping ? 1 : -1;
-        foreach (var (abil, val) in item.Abilities)
-        {
-            if (abil == 88)
-            {
-                target.MaxHP += sign * val;
-                target.CurrentHP += sign * val;
-            }
-            else if (abil == 160)
-            {
-                target.SetQuestAbilityValue(GetLearnedScrollSpellAbilityId(val), equipping ? 1 : 0);
-            }
-        }
-    }
+        => target.ApplyEquipInstantAbilities(item, equipping);
 
     private async Task HandleRemove(string target)
     {
@@ -2356,6 +2341,9 @@ public partial class CommandParser
             return false;
         }
 
+        if (_player.Equipment.TryGetValue(equippedSlot, out int burntOutItemId)
+            && _world.Database.Items.TryGetValue(burntOutItemId, out var burntOutItem))
+            ApplyEquipInstantAbilities(burntOutItem, equipping: false);
         _player.Equipment.Remove(equippedSlot);
         _player.EquipmentInstanceIds.Remove(equippedSlot);
         _world.RemoveItemRuntimeState(instanceId);
@@ -2643,6 +2631,7 @@ public partial class CommandParser
                 long equippedInstanceId = GetEquipmentInstanceId(slot, eqId);
                 _player.Equipment.Remove(slot);
                 _player.EquipmentInstanceIds.Remove(slot);
+                ApplyEquipInstantAbilities(item, equipping: false);
                 return (eqId, true, equippedInstanceId);
             }
         }

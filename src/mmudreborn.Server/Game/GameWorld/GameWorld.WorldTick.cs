@@ -2235,6 +2235,9 @@ public partial class GameWorld
                     ? existingInstanceId
                     : CreateItemInstance(itemId);
                 Database.Items.TryGetValue(itemId, out var item);
+                // Death unequips EVERY worn item, kept or dropped, so each one's +HP comes off (bug #257).
+                if (item != null)
+                    player.ApplyEquipInstantAbilities(item, equipping: false);
                 if (!isPermadeath && item != null
                     && (item.Abilities.ContainsKey(100) || item.Abilities.ContainsKey(83)))
                 {

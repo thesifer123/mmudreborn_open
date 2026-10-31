@@ -423,6 +423,8 @@ public partial class GameWorld
                      it.Abilities.GetValueOrDefault(GangHouseItemAbilityId) is var t && t > 0 && matchesHouse(t))
                      .Select(kv => kv.Key).ToList())
         {
+            if (Database.Items.TryGetValue(player.Equipment[slot], out var removedItem))
+                player.ApplyEquipInstantAbilities(removedItem, equipping: false);
             player.Equipment.Remove(slot);
             player.EquipmentInstanceIds.Remove(slot);
             removed = true;

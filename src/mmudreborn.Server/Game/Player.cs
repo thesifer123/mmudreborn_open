@@ -2054,6 +2054,31 @@ public class Player
     }
 
     /// <summary>
+    /// Instant per-equip effects, applied once on equip and reversed on unequip. Ability 88 adds flat
+    /// max+current HP while worn; ability 160 grants (or purges) a spell in the spellbook. MaxHP is a stored,
+    /// incremental field, so the delta persists through level-ups and saves (matching stock). EVERY path that
+    /// takes a worn or wielded item away — remove, give, drop, sell, hide, death, hangup, used up — must call
+    /// this with <paramref name="equipping"/> false, as every stock item-removal path reverses them; a path
+    /// that skips it leaves the HP bonus behind (bug #257).
+    /// </summary>
+    public void ApplyEquipInstantAbilities(Item item, bool equipping)
+    {
+        int sign = equipping ? 1 : -1;
+        foreach (var (abil, val) in item.Abilities)
+        {
+            if (abil == 88)
+            {
+                MaxHP += sign * val;
+                CurrentHP += sign * val;
+            }
+            else if (abil == 160)
+            {
+                SetQuestAbilityValue(GetLearnedSpellbookAbilityId(val), equipping ? 1 : 0);
+            }
+        }
+    }
+
+    /// <summary>
     /// Grant a quest ability by PRESENCE, storing it even at value 0. Boolean abilities like Perfect
     /// Stealth (#186, the "supernatural stealth" assassin-quest reward) are granted as
     /// <c>giveability 186 0</c>; the entry is stored regardless of value, and
