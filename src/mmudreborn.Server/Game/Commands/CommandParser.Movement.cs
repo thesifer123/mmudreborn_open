@@ -134,7 +134,7 @@ public partial class CommandParser
         string dragSuffix = draggedPlayer == null ? string.Empty : $" (Dragging {draggedPlayer.Name})";
         string movementDisplayName = $"{_player.Name}{dragSuffix}";
 
-        var destination = _world.FindMovementExit(_player, currentRoom, direction);
+        var destination = _world.FindWalkableExit(_player, currentRoom, direction);
         if (destination == null)
         {
             await _client.SendLineAsync("There is no exit in that direction!");

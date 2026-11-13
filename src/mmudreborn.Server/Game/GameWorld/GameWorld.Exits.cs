@@ -53,6 +53,16 @@ public partial class GameWorld
         return exit;
     }
 
+    // A compass WALK first asks whether there is an exit to walk at all, before the move (or its delay)
+    // starts. Stock answers no for a spell/portal exit (type 1) as well as a missing one, so walking into a
+    // portal gets "There is no exit in that direction!". A portal is passable only by following someone
+    // through it or being cast through it, and neither comes through here.
+    public RoomExitDefinition? FindWalkableExit(Player player, Room room, string direction)
+    {
+        var exit = FindMovementExit(player, room, direction);
+        return exit is { ExitType: RoomExitType.Spell } ? null : exit;
+    }
+
     private RoomExitState GetExitState(RoomExitDefinition exit)
     {
         return _roomExitStates.GetOrAdd((exit.MapNumber, exit.RoomNumber, exit.Direction), _ => new RoomExitState
@@ -781,8 +791,10 @@ public partial class GameWorld
 
         // Exit type 1: a Spell/portal exit is passable only by FOLLOWING someone through, or
         // by being cast/teleported through (a spell-teleport bypasses this gate entirely by setting the
-        // destination directly — moveType 4). A normal walk is refused; a player dragging someone gets a
-        // distinct refusal. (Dead in stock data — zero live rows — but faithfully gated so it works if used.)
+        // destination directly — moveType 4). A compass walk never gets here: FindWalkableExit already
+        // turned it away as "no exit", as stock does. This gate covers any other non-follow mover; a
+        // player dragging someone gets a distinct refusal. (Dead in stock data — zero live rows — but
+        // faithfully gated so it works if used.)
         if (exit.ExitType == RoomExitType.Spell && !isFollowMove)
         {
             failureMessage = TryGetDraggedPlayer(player, out _)

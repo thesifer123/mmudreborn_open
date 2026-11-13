@@ -352,8 +352,8 @@ public partial class CommandParser
         if (currentRoom == null)
             return TimeSpan.Zero;
 
-        // No exit in that direction → instant (HandleMovement prints the rejection); don't burn a delay.
-        if (_world.FindMovementExit(_player, currentRoom, direction) == null)
+        // No exit to walk in that direction → instant (HandleMovement prints the rejection); don't burn a delay.
+        if (_world.FindWalkableExit(_player, currentRoom, direction) == null)
             return TimeSpan.Zero;
 
         var draggedPlayer = GetDraggedPlayerForMovement(currentRoom);
