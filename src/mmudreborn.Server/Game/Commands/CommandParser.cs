@@ -86,14 +86,18 @@ public partial class CommandParser
     // "You are too stunned to move anywhere!") or the HoldPerson root (
     // "You can't seem to move anywhere!"). Neither blocks attacking or casting; the only thing that
     // interrupts an action is confusion (a per-action roll, handled separately).
-    private bool IsMovementBlockedByStatus
-        => (_player.IsKnockedDown && _player.KnockdownKind == KnockdownKind.Smash) || _player.IsRooted;
+    private bool IsMovementBlockedByStatus => IsMovementBlockedFor(_player);
 
-    private string GetMovementBlockMessage()
+    private static bool IsMovementBlockedFor(Player player)
+        => (player.IsKnockedDown && player.KnockdownKind == KnockdownKind.Smash) || player.IsRooted;
+
+    private string GetMovementBlockMessage() => GetMovementBlockMessageFor(_player);
+
+    private static string GetMovementBlockMessageFor(Player player)
     {
-        if (_player.IsKnockedDown && _player.KnockdownKind == KnockdownKind.Smash)
+        if (player.IsKnockedDown && player.KnockdownKind == KnockdownKind.Smash)
             return SmashKnockdownMoveBlockMessage;
-        if (_player.IsRooted)
+        if (player.IsRooted)
             return HoldPersonMoveBlockMessage;
         return string.Empty;
     }

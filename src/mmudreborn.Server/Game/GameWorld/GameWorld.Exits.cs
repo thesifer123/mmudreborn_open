@@ -56,11 +56,12 @@ public partial class GameWorld
     // A compass WALK first asks whether there is an exit to walk at all, before the move (or its delay)
     // starts. Stock answers no for a spell/portal exit (type 1) as well as a missing one, so walking into a
     // portal gets "There is no exit in that direction!". A portal is passable only by following someone
-    // through it or being cast through it, and neither comes through here.
+    // through it or being cast through it, and neither comes through here. Stock also answers no for a
+    // trap exit whose trap state can't be walked, such as a trapdoor (see IsWalkableTrapState).
     public RoomExitDefinition? FindWalkableExit(Player player, Room room, string direction)
     {
         var exit = FindMovementExit(player, room, direction);
-        return exit is { ExitType: RoomExitType.Spell } ? null : exit;
+        return exit is { ExitType: RoomExitType.Spell } or { IsWalkableTrapState: false } ? null : exit;
     }
 
     private RoomExitState GetExitState(RoomExitDefinition exit)
@@ -616,6 +617,10 @@ public partial class GameWorld
         RefreshTrapReArm(state, DateTime.UtcNow);
         return state.TrapDisarmed;
     }
+
+    // A player dropped through a sprung trapdoor takes the trap's damage like any trap exit, armed state
+    // aside (stock fires it unconditionally). Returns the damage dealt.
+    public int ApplyTrapdoorDamage(Player player, RoomExitDefinition trapdoor) => ApplyTrapDamage(player, trapdoor);
 
     private int ApplyTrapDamage(Player player, RoomExitDefinition exit)
     {
@@ -1239,6 +1244,11 @@ public partial class GameWorld
                     targetState.Access.IsUnlocked = true;
                 StartTimedAccess(targetExit, targetState);
                 SyncExitStateAfterChange(targetExit, targetState);
+            }
+            else if (targetExit.IsTrapdoorExit)
+            {
+                // A trapdoor springs: the caller drops everyone in the target room through it.
+                result.TrapdoorExit = targetExit;
             }
             else
             {

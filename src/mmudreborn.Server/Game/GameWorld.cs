@@ -124,6 +124,10 @@ public partial class GameWorld : IBbsDoorContext
         // part of firing the action (the charge is deducted before running
         // it), so the caller must consume it. 0 when the trigger carried no item requirement.
         public int ConsumedItemId { get; set; }
+
+        // Set when the action targets a trapdoor (a trap exit in state 2): the caller drops everyone in
+        // that room through it, as stock does.
+        public RoomExitDefinition? TrapdoorExit { get; set; }
     }
 
     private sealed class RoomExitState

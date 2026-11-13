@@ -1765,6 +1765,39 @@ public partial class GameWorld
         }
     }
 
+    // A sprung trapdoor also drops every monster in the room through it, after the players. Stock forces
+    // each one through the monster mover, so the usual gates still apply, as on a leader's drag: never a
+    // Stationary, the destination's monster group, the exit-type switch and its trap damage, and a free
+    // slot at the far end.
+    public void DropRoomMonstersThroughTrapdoor(RoomExitDefinition trapdoor)
+    {
+        var destRoom = GetRoom(trapdoor.TargetMap, trapdoor.TargetRoom);
+        if (destRoom == null)
+            return;
+
+        var from = (trapdoor.MapNumber, trapdoor.RoomNumber);
+        var to = (destRoom.MapNumber, destRoom.RoomNumber);
+        var announcements = new List<MonsterMovementAnnouncement>();
+        lock (_monsterLock)
+        {
+            foreach (var monster in GetMonstersInRoom(from.MapNumber, from.RoomNumber).Where(m => !m.IsDead).ToList())
+            {
+                if (monster.Template.Type == 3 || !CanMonsterEnterRoomByMovement(monster.Template, destRoom, trapdoor))
+                    continue;
+                if (!CanMonsterTraverseExitType(monster.Template, trapdoor, GetLiveDoorLockState(trapdoor)))
+                    continue;
+
+                ApplyMonsterExitTrap(monster, trapdoor);
+                if (IsRoomPhysicallyFull(to))
+                    break;
+
+                announcements.Add(MoveMonster(monster, from, to, trapdoor.Direction));
+            }
+        }
+
+        AnnounceMonsterMovements(announcements);
+    }
+
     private void MoveMonsterPursuit(MonsterInstance monster, Player player, (int Map, int Room) from, (int Map, int Room) to, string direction)
     {
         // Pursuit (kiting) does not free the lair slot or arm its timer either — death-only, as above.

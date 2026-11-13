@@ -868,6 +868,11 @@ public partial class CommandParser
                 $"{MudAnsi.BrightWhite}{remoteAction.RevealRoomMessage}{MudAnsi.Reset}", _client);
 
         await ConsumeItemChargeAsync(remoteAction.ConsumedItemId);
+
+        // A sprung trapdoor drops everyone in its room (the actor too, when they stand on it) through it.
+        if (remoteAction.TrapdoorExit != null)
+            await DropRoomThroughTrapdoorAsync(remoteAction.TrapdoorExit);
+
         return true;
     }
 

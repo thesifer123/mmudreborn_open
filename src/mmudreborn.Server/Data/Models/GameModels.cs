@@ -259,6 +259,12 @@ public sealed class RoomExitDefinition
     // Either kind is disarmable via `disarm trap` and shares the re-arm timer.
     public bool IsDisarmableTrapExit => IsTrapExit || IsSpellTrapExit;
     public bool TrapStartsArmed => IsDisarmableTrapExit && Para2 != 1;
+    // Stock reads a trap exit's Para2 as its live trap state. 0/3 (armed) and 1/4 (disarmed) can be
+    // walked; a 2 is a TRAPDOOR that can never be walked ("There is no exit in that direction!") and is
+    // sprung only by a remote action, which drops everyone in the room through it. Any other value cannot
+    // be walked either. Stock never changes a 2 (its resets and timers only re-arm 1->0 and 4->3).
+    public bool IsTrapdoorExit => IsTrapExit && Para2 == 2;
+    public bool IsWalkableTrapState => !IsTrapExit || Para2 is 0 or 1 or 3 or 4;
 
     public IEnumerable<string> GetCommandPhrases(IReadOnlyDictionary<int, RoomMessage>? messages)
     {

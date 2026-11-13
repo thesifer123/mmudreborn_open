@@ -572,6 +572,14 @@ public partial class CommandParser
 
     private async Task ExecuteTextCommandExitAsync(Room room, RoomExitDefinition destination)
     {
+        // Stock refuses a held or stunned player first ("You can't seem to move anywhere!" / "You are too
+        // stunned to move anywhere!"), exactly as on a compass move, and leaves their sneak on.
+        if (IsMovementBlockedByStatus)
+        {
+            await _client.SendLineAsync(GetMovementBlockMessage());
+            return;
+        }
+
         // Stock ends sneak and hide the moment a text-command exit is taken, BEFORE the move itself (even
         // with Perfect Stealth, and even if the move is then refused). So the mover is never sneaking
         // here: they draw the departing free swing and the room sees them leave, like any walker.
@@ -680,6 +688,15 @@ public partial class CommandParser
             if (follower.IsUnconscious)
             {
                 DropFollowerFromLeaderParty(follower, null);
+                continue;
+            }
+
+            // Stock moves each follower through the mover in its own right, and the mover refuses a held or
+            // stunned follower first ("You can't seem to move anywhere!" / "You are too stunned to move
+            // anywhere!") and stops it following.
+            if (IsMovementBlockedFor(follower))
+            {
+                DropFollowerFromLeaderParty(follower, GetMovementBlockMessageFor(follower));
                 continue;
             }
 
@@ -1365,6 +1382,15 @@ public partial class CommandParser
                 continue;
             }
 
+            // Stock moves each follower through the mover in its own right, and the mover refuses a held or
+            // stunned follower first ("You can't seem to move anywhere!" / "You are too stunned to move
+            // anywhere!") and stops it following.
+            if (IsMovementBlockedFor(follower))
+            {
+                DropFollowerFromLeaderParty(follower, GetMovementBlockMessageFor(follower));
+                continue;
+            }
+
             var followerClient = _world.GetClientForPlayer(follower.Name);
 
             // Each follower sneaks individually. Stock moves a sneaking follower through the same sneak
@@ -1604,6 +1630,109 @@ public partial class CommandParser
         _player.IsSneaking = false;
         return true;
     }
+
+    // A remote action that springs a trapdoor (a trap exit in state 2) drops EVERY player in that room
+    // through it, then every monster, as stock does. Each player goes through the mover in its own right
+    // (FallThroughTrapdoorAsync), so a held, stunned or over-encumbered player stays where they are.
+    private async Task DropRoomThroughTrapdoorAsync(RoomExitDefinition trapdoor)
+    {
+        var fromRoom = _world.GetRoom(trapdoor.MapNumber, trapdoor.RoomNumber);
+        if (fromRoom == null || _world.GetRoom(trapdoor.TargetMap, trapdoor.TargetRoom) == null)
+            return;
+
+        foreach (var faller in _world.GetPlayersInRoom(fromRoom.MapNumber, fromRoom.RoomNumber))
+        {
+            if (ReferenceEquals(faller, _player))
+            {
+                await FallThroughTrapdoorAsync(fromRoom, trapdoor, pushedOutput: false);
+                continue;
+            }
+
+            var fallerClient = _world.GetClientForPlayer(faller.Name);
+            if (fallerClient != null)
+                await new CommandParser(fallerClient, _world, faller).FallThroughTrapdoorAsync(fromRoom, trapdoor, pushedOutput: true);
+        }
+
+        _world.DropRoomMonstersThroughTrapdoor(trapdoor);
+    }
+
+    // One player falling through a sprung trapdoor. Stock's mover refuses a held or stunned player and one
+    // too heavy to move; anyone else takes the trap's damage ([Para1/2, Para1]) and its message (Para3):
+    // Line1 to the faller (green, %d = the damage), Line2 to the room left and Line3 to the room below
+    // (bright yellow, the name in green). There are no ordinary walk lines and no departing swing. Hide,
+    // rest and meditation end; a sneak does not. pushedOutput: the faller didn't type the command, so their
+    // lines are pushed to them the way a party follow's are.
+    private async Task FallThroughTrapdoorAsync(Room fromRoom, RoomExitDefinition trapdoor, bool pushedOutput)
+    {
+        bool holding = pushedOutput && _client.HasPendingInput;
+        if (pushedOutput)
+        {
+            _player.SuppressBroadcastReprompt = true;
+            if (!holding)
+                await _client.ClearCurrentLineAsync();
+            _client.BeginHeldOutput();
+        }
+
+        try
+        {
+            if (IsMovementBlockedByStatus)
+            {
+                await _client.SendLineAsync(GetMovementBlockMessage());
+                return;
+            }
+
+            if (IsOverEncumberedForMovement())
+            {
+                await _client.SendLineAsync("You are too heavy to move!");
+                return;
+            }
+
+            _world.Database.Messages.TryGetValue(trapdoor.Para3, out var message);
+            int damage = _world.ApplyTrapdoorDamage(_player, trapdoor);
+
+            if (!string.IsNullOrWhiteSpace(message?.Line2))
+                _world.BroadcastToRoom(fromRoom.MapNumber, fromRoom.RoomNumber, FormatTrapRoomLine(message.Line2), _client);
+
+            var departingMonsterAttackers = SnapshotDepartingMonsterAttackers(_player, fromRoom.MapNumber, fromRoom.RoomNumber);
+            _player.IsHidden = false;
+            _player.IsResting = false;
+            _player.IsMeditating = false;
+            _player.CurrentMapNumber = trapdoor.TargetMap;
+            _player.CurrentRoomNumber = trapdoor.TargetRoom;
+            _player.RecordMove(trapdoor.TargetMap, trapdoor.TargetRoom);
+            ResolvePostTravelCombatState(_player, fromRoom, trapdoor, departingMonsterAttackers);
+            _world.NotifyPlayerEnteredRoom(_player);
+
+            if (!string.IsNullOrWhiteSpace(message?.Line3))
+                _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, FormatTrapRoomLine(message.Line3), _client);
+
+            if (!string.IsNullOrWhiteSpace(message?.Line1))
+                await _client.SendLineAsync($"{MudAnsi.LinePreamble}{MudAnsi.Green}{message.Line1.Replace("%d", damage.ToString(), StringComparison.Ordinal)}{MudAnsi.Reset}");
+
+            if (_player.CurrentHP <= Player.DeathHP)
+            {
+                await HandlePlayerDeath();
+            }
+            else
+            {
+                await ShowRoom(brief: _player.BriefMode);
+                await CheckEncounters();
+            }
+        }
+        finally
+        {
+            if (pushedOutput)
+            {
+                _client.EndHeldOutput();
+                if (!holding)
+                    await _client.SendAsync(MudAnsi.Prompt(_player));
+                _player.SuppressBroadcastReprompt = false;
+            }
+        }
+    }
+
+    private string FormatTrapRoomLine(string line)
+        => $"{MudAnsi.BrightYellow}{line.Replace("%s", $"{MudAnsi.Green}{_player.Name}", StringComparison.OrdinalIgnoreCase)}{MudAnsi.Reset}";
 
     // genrdn(0,100) < Perception: the more perceptive mover notices their own noise.
     private static bool MoverHearsOwnSneakBreak(Player mover) => Random.Shared.Next(0, 100) < mover.Perception;
