@@ -80,14 +80,14 @@ public partial class CommandParser
         if (fromRoom.IsProtected)
             return false;
 
-        // A sneaking player is normally exempt from the departing free swing — EXCEPT
-        // against a monster that can see through stealth (ability 57, See Hidden). Stock
-        // keeps such a monster (e.g. a Ghost) pursuing/acting on the sneaker, so it still gets its swing —
-        // which engages it and lets the existing pursuit logic follow the sneaker out. Non-see-hidden
-        // monsters remain fooled.
-        bool onlySeeHiddenMayAttack = _player.IsSneaking;
+        // Stock gives the departing swing only when this move's sneak did NOT hold. Every mover rolls its
+        // sneak (or has it ended, on a text-command exit) before this point, so a mover still sneaking here
+        // held the roll or has Perfect Stealth, and NO monster swings at them, See Hidden or not. (A See
+        // Hidden monster still notices a sneaker standing in its room through the regular aggro pass.)
+        if (_player.IsSneaking)
+            return false;
 
-        var attacker = SelectDepartingFreeAttacker(fromRoom, onlySeeHiddenMayAttack);
+        var attacker = SelectDepartingFreeAttacker(fromRoom);
         if (attacker == null)
             return false;
 
@@ -137,17 +137,13 @@ public partial class CommandParser
     // / guards (align 0/3/4) and summoned (Group 37) monsters only swing if already LOCKED onto the
     // player; aggressive mobs swing locked-or-not; evil NPCs (align 6) are skipped against players whose
     // EvilPoints are >= 80. One swing per move.
-    private MonsterInstance? SelectDepartingFreeAttacker(Room fromRoom, bool onlySeeHidden)
+    private MonsterInstance? SelectDepartingFreeAttacker(Room fromRoom)
     {
         int roll = Random.Shared.Next(0, 100);   // [0,99]; top EXCLUSIVE
 
         foreach (var monster in _world.GetMonstersInRoom(fromRoom.MapNumber, fromRoom.RoomNumber))
         {
             if (monster.IsDead)
-                continue;
-            // A sneaking player is invisible to monsters without See Hidden — only a see-hidden monster
-            // (e.g. a Ghost) may take the free swing at the departing sneaker.
-            if (onlySeeHidden && !CombatEngine.MonsterCanSeeHidden(monster.Template))
                 continue;
             // Charm exemptions: your own pet (charm-named +
             // owner match) never free-swings you, and a freshly summoned/charmed monster

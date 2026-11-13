@@ -147,6 +147,25 @@ public partial class CommandParser
             return;
         }
 
+        // The sneak state is snapshotted up front, then the per-move
+        // stealth check. The SNAPSHOT drives this move's messaging (a breaking sneak still renders with
+        // the "You notice ... sneak" lines, not a plain walk-in); a failed roll clears the live sneak
+        // flag so it's dead from the next move on. Capture the snapshot before resolving the roll.
+        // Stock rolls at the START of the move, once it knows there is an exit to walk: before the exit's
+        // own gates (door, trap, cast, item, room permission) and before the departing free swing. So a
+        // sneak can break on a move that is then blocked, and only a sneak that HELD is spared the swing.
+        bool movingAsSneaker = _player.IsSneaking;
+        // Stock announces a sneaker ONLY when this move's own stealth roll broke the sneak, and then to
+        // EVERY player in both rooms — there is no per-observer perception check. A sneak that held is
+        // announced to no one. So anyone who sees "You notice ... sneak in" knows the sneak is already
+        // gone, and a backstab right after is a plain attack.
+        bool sneakBrokeThisMove = false;
+        if (movingAsSneaker)
+        {
+            await _client.SendLineAsync($"{MudAnsi.White}Sneaking...{MudAnsi.Reset}");
+            sneakBrokeThisMove = RollSneakMoveBreak(currentRoom);
+        }
+
         if (!_world.CanTraverseExit(_player, currentRoom, destination, out var failureMessage, out var successMessage))
         {
             if (destination.IsItemExit)
@@ -216,24 +235,6 @@ public partial class CommandParser
         {
             await _client.SendLineAsync("You are not permitted in that room!");
             return;
-        }
-
-        // The sneak state is snapshotted up front, then the per-move
-        // stealth check. The SNAPSHOT drives this move's messaging (a breaking sneak still renders with
-        // the "You notice ... sneak" lines, not a plain walk-in); a failed roll clears the live sneak
-        // flag so it's dead from the next move on. Capture the snapshot before resolving the roll.
-        // Stock rolls BEFORE the departing free swing, so only a sneak that HELD is exempt from the
-        // swing; a sneaker whose roll fails leaves like any walker and can be swung at.
-        bool movingAsSneaker = _player.IsSneaking;
-        // Stock announces a sneaker ONLY when this move's own stealth roll broke the sneak, and then to
-        // EVERY player in both rooms — there is no per-observer perception check. A sneak that held is
-        // announced to no one. So anyone who sees "You notice ... sneak in" knows the sneak is already
-        // gone, and a backstab right after is a plain attack.
-        bool sneakBrokeThisMove = false;
-        if (movingAsSneaker)
-        {
-            await _client.SendLineAsync($"{MudAnsi.White}Sneaking...{MudAnsi.Reset}");
-            sneakBrokeThisMove = RollSneakMoveBreak(currentRoom);
         }
 
         // As a non-sneaking player departs, an eligible room monster gets one free
@@ -571,6 +572,12 @@ public partial class CommandParser
 
     private async Task ExecuteTextCommandExitAsync(Room room, RoomExitDefinition destination)
     {
+        // Stock ends sneak and hide the moment a text-command exit is taken, BEFORE the move itself (even
+        // with Perfect Stealth, and even if the move is then refused). So the mover is never sneaking
+        // here: they draw the departing free swing and the room sees them leave, like any walker.
+        _player.IsSneaking = false;
+        _player.IsHidden = false;
+
         if (IsOverEncumberedForMovement())
         {
             await _client.SendLineAsync("You are too heavy to move!");
@@ -602,7 +609,6 @@ public partial class CommandParser
         if (await TryDepartingMonsterFreeAttackAsync(room))
             return;
 
-        bool wasSneaking = _player.IsSneaking;
         var departingMonsterAttackers = SnapshotDepartingMonsterAttackers(_player, room.MapNumber, room.RoomNumber);
 
         (string goMsg, TravelMessageType travelType) = GetTextExitSelfMessageWithType(destination);
@@ -612,20 +618,12 @@ public partial class CommandParser
         // Broadcast the departure line (message Line2, e.g. "%s jumps into the large fountain.") to the
         // SOURCE room so onlookers see the actor leave — the cardinal HandleMovement path does this for
         // text exits too, but this text-COMMAND ("go fountain") path was dropping it, leaving the room
-        // silent. Gated on sneaking, like every other departure broadcast. Emit while still in the
+        // silent. Never gated on sneaking: the sneak already ended above. Emit while still in the
         // source room (before the position change below).
-        if (!wasSneaking)
-        {
-            string departMsg = GetTextExitDepartureMessage(destination);
-            if (!string.IsNullOrWhiteSpace(departMsg))
-                _world.BroadcastToRoom(room.MapNumber, room.RoomNumber, departMsg, _client);
-        }
+        string departMsg = GetTextExitDepartureMessage(destination);
+        if (!string.IsNullOrWhiteSpace(departMsg))
+            _world.BroadcastToRoom(room.MapNumber, room.RoomNumber, departMsg, _client);
 
-        // Perfect/Supernatural Stealth (ability 186) never breaks on a move — including text-command
-        // exits (the cardinal-move path already honors this via RollSneakMoveBreak).
-        if (!_player.HasPerfectStealth)
-            _player.IsSneaking = false;
-        _player.IsHidden = false;
         _player.IsResting = false;
         _player.IsMeditating = false;
 
@@ -643,17 +641,12 @@ public partial class CommandParser
                 arriveMsg, _client);
         }
 
-        // Gate on the POST-move sneak state, not the pre-move `wasSneaking` snapshot: stock keys
-        // the noise off whether the sneak HELD through this move, so a sneak that broke on the
-        // way is audible next door. The snapshot above is still right for the departure broadcast --
-        // you were sneaking when you left the source room -- but it would wrongly silence a break.
-        if (!_player.IsSneaking)
-        {
-            _world.BroadcastAdjacentMovementNoise(
-                _player.CurrentMapNumber,
-                _player.CurrentRoomNumber,
-                excludeRooms: [(room.MapNumber, room.RoomNumber), (_player.CurrentMapNumber, _player.CurrentRoomNumber)]);
-        }
+        // Stock keys the noise off whether a sneak HELD through the move; a text-command exit always
+        // ends the sneak first, so this move is always audible next door.
+        _world.BroadcastAdjacentMovementNoise(
+            _player.CurrentMapNumber,
+            _player.CurrentRoomNumber,
+            excludeRooms: [(room.MapNumber, room.RoomNumber), (_player.CurrentMapNumber, _player.CurrentRoomNumber)]);
 
         await ShowRoom(brief: _player.BriefMode);
         await MoveFollowingPartyMembersThroughTextExitAsync(room, destination);
@@ -690,13 +683,23 @@ public partial class CommandParser
                 continue;
             }
 
+            var followerClient = _world.GetClientForPlayer(follower.Name);
+
+            // Each follower sneaks individually and re-rolls stealth on the follow move, exactly as on a
+            // compass follow (see MoveFollowingPartyMembersAsync): a held roll keeps the sneak and is
+            // announced to no one; a failed roll ends it and every player in both rooms is told. The roll
+            // comes first, before the exit and entry gates and the free swing, so a follower whose sneak
+            // breaks can be swung at, and a follow that is then blocked has still rolled.
+            bool followerSneaking = follower.IsSneaking;
+            bool followerSneakBroke = followerSneaking && followerClient != null &&
+                new CommandParser(followerClient, _world, follower).RollSneakMoveBreak(currentRoom);
+
             if (!_world.CanTraverseExit(follower, currentRoom, exit, out var failureMessage, out _, isFollowMove: true))
             {
                 DropFollowerFromLeaderParty(follower, failureMessage);
                 continue;
             }
 
-            var followerClient = _world.GetClientForPlayer(follower.Name);
             if (followerClient == null)
                 continue;
 
@@ -707,14 +710,6 @@ public partial class CommandParser
                 DropFollowerFromLeaderParty(follower, null);
                 continue;
             }
-
-            // Each follower sneaks individually and re-rolls stealth on the follow move, exactly as on a
-            // compass follow (see MoveFollowingPartyMembersAsync): a held roll keeps the sneak and is
-            // announced to no one; a failed roll ends it and every player in both rooms is told. The roll
-            // comes before the free swing, so a follower whose sneak breaks can be swung at.
-            bool followerSneaking = follower.IsSneaking;
-            bool followerSneakBroke = followerSneaking &&
-                new CommandParser(followerClient, _world, follower).RollSneakMoveBreak(currentRoom);
 
             // The follower's own departing free swing, as on a compass follow (see MoveFollowingPartyMembersAsync).
             if (await new CommandParser(followerClient, _world, follower).TryDepartingMonsterFreeAttackAsync(currentRoom))
@@ -1370,6 +1365,17 @@ public partial class CommandParser
                 continue;
             }
 
+            var followerClient = _world.GetClientForPlayer(follower.Name);
+
+            // Each follower sneaks individually. Stock moves a sneaking follower through the same sneak
+            // path as a solo sneaker, so the follower re-rolls stealth on the follow move: a held roll keeps
+            // the sneak and is announced to no one; a failed roll ends it and every player in both rooms is
+            // told (mirrors the solo move path). Stock rolls at the very start of the follower's move, before
+            // its exit and entry gates and the free swing below, so a blocked follow has still rolled.
+            bool followerSneaking = follower.IsSneaking;
+            bool followerSneakBroke = followerSneaking && followerClient != null &&
+                new CommandParser(followerClient, _world, follower).RollSneakMoveBreak(currentRoom);
+
             var followerExit = _world.FindMovementExit(follower, currentRoom, direction);
             if (followerExit == null)
             {
@@ -1390,7 +1396,6 @@ public partial class CommandParser
                 continue;
             }
 
-            var followerClient = _world.GetClientForPlayer(follower.Name);
             if (followerClient == null)
                 continue;
 
@@ -1401,14 +1406,6 @@ public partial class CommandParser
                 DropFollowerFromLeaderParty(follower, null);
                 continue;
             }
-
-            // Each follower sneaks individually. Stock moves a sneaking follower through the same sneak
-            // path as a solo sneaker, so the follower re-rolls stealth on the follow move: a held roll keeps
-            // the sneak and is announced to no one; a failed roll ends it and every player in both rooms is
-            // told (mirrors the solo move path). The roll comes before the free swing below.
-            bool followerSneaking = follower.IsSneaking;
-            bool followerSneakBroke = followerSneaking &&
-                new CommandParser(followerClient, _world, follower).RollSneakMoveBreak(currentRoom);
 
             // Each follower goes through the stock mover in its own right, so a follower
             // who isn't sneaking rolls its own departing free swing in the room it is leaving — not only
