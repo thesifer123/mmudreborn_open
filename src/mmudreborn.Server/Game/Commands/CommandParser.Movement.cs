@@ -248,14 +248,20 @@ public partial class CommandParser
 
         // The sneak state is snapshotted up front, then the per-move
         // stealth check. The SNAPSHOT drives this move's messaging (a breaking sneak still renders with
-        // stealthy per-observer notices); a failed roll clears the live sneak flag so it's dead from the
-        // next move on. Capture the snapshot before resolving the roll.
+        // the "You notice ... sneak" lines, not a plain walk-in); a failed roll clears the live sneak
+        // flag so it's dead from the next move on. Capture the snapshot before resolving the roll.
         bool movingAsSneaker = _player.IsSneaking;
         if (movingAsSneaker)
         {
             await _client.SendLineAsync($"{MudAnsi.White}Sneaking...{MudAnsi.Reset}");
             await ResolveSneakMoveBreakAsync(currentRoom);
         }
+
+        // Stock announces a sneaker ONLY when this move's own stealth roll broke the sneak, and then to
+        // EVERY player in both rooms — there is no per-observer perception check. A sneak that held is
+        // announced to no one. So anyone who sees "You notice ... sneak in" knows the sneak is already
+        // gone, and a backstab right after is a plain attack.
+        bool sneakBrokeThisMove = movingAsSneaker && !_player.IsSneaking;
 
         // Fully invisible sysops produce no departure/arrival messages at all.
         bool sysopSilentMove = _player.IsSysopInvisible;
@@ -271,14 +277,12 @@ public partial class CommandParser
         }
         else if (movingAsSneaker)
         {
-            // Per-observer: each player independently checks perception vs stealth
-            var departureObservers = _world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player);
-            foreach (var observer in departureObservers)
+            // Only a broken sneak is announced, and then to everyone in the room (see sneakBrokeThisMove).
+            if (sneakBrokeThisMove)
             {
-                if (ObserverNoticesSneaker(observer, _player))
-                {
+                var departureObservers = _world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player);
+                foreach (var observer in departureObservers)
                     _world.SendToPlayer(observer.Name, GetSneakDepartureMessage(_player.Name, departDir));
-                }
             }
         }
         else
@@ -338,14 +342,12 @@ public partial class CommandParser
         }
         else if (!suppressStandardArrivalMessaging && movingAsSneaker)
         {
-            // Per-observer: each player in the arrival room checks perception vs stealth
-            var arrivalObservers = _world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player);
-            foreach (var observer in arrivalObservers)
+            // Only a broken sneak is announced, and then to everyone in the room (see sneakBrokeThisMove).
+            if (sneakBrokeThisMove)
             {
-                if (ObserverNoticesSneaker(observer, _player))
-                {
+                var arrivalObservers = _world.GetPlayersInRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, _player);
+                foreach (var observer in arrivalObservers)
                     _world.SendToPlayer(observer.Name, GetSneakArrivalMessage(_player.Name, arriveDir));
-                }
             }
         }
         else if (!suppressStandardArrivalMessaging)
@@ -383,7 +385,7 @@ public partial class CommandParser
         // skips the entire action-exit branch, so the MOVER sees no self-traversal narration either — just
         // the "Sneaking..." line and the room description. Only a BROKEN sneak falls through and prints the
         // line (the same move that reveals you to the room). The room-visible depart/arrive lines are
-        // already routed through the per-observer sneak model above, so they never leak the action message.
+        // already routed through the sneak branch above, so they never leak the action message.
         bool sneakHeld = movingAsSneaker && _player.IsSneaking;
 
         // Adjacent rooms hear the move unless the sneak HELD. The call is gated on
@@ -710,14 +712,18 @@ public partial class CommandParser
 
             var departingMonsterAttackers = SnapshotDepartingMonsterAttackers(follower, currentRoom.MapNumber, currentRoom.RoomNumber);
 
-            // Each follower sneaks individually: a SNEAKing follower keeps that state through the
-            // party move. Moving only breaks HIDE, never SNEAK (mirrors the solo move path).
+            // Each follower sneaks individually and re-rolls stealth on the follow move, exactly as on a
+            // compass follow (see MoveFollowingPartyMembersAsync): a held roll keeps the sneak and is
+            // announced to no one; a failed roll ends it and every player in both rooms is told.
             bool followerSneaking = follower.IsSneaking;
+            bool followerSneakBroke = followerSneaking &&
+                new CommandParser(followerClient, _world, follower).RollSneakMoveBreak(currentRoom);
+            bool followerHeardOwnSneakBreak = followerSneakBroke && MoverHearsOwnSneakBreak(follower);
             if (followerSneaking)
             {
-                foreach (var observer in _world.GetPlayersInRoom(currentRoom.MapNumber, currentRoom.RoomNumber, follower))
+                if (followerSneakBroke)
                 {
-                    if (ObserverNoticesSneaker(observer, follower))
+                    foreach (var observer in _world.GetPlayersInRoom(currentRoom.MapNumber, currentRoom.RoomNumber, follower))
                         _world.SendToPlayer(observer.Name, GetTextExitDepartureMessage(exit, follower.Name));
                 }
             }
@@ -736,7 +742,7 @@ public partial class CommandParser
             follower.IsHidden = false;
             // The "moved this tick" bit: a sneaking move keeps the follower unseen by monsters
             // until the next upkeep clears it (the could-attack gate A).
-            follower.SneakedInThisTick = followerSneaking;
+            follower.SneakedInThisTick = follower.IsSneaking;
 
             ResolvePostTravelCombatState(follower, currentRoom, exit, departingMonsterAttackers);
             _world.NotifyPlayerEnteredRoom(follower);
@@ -752,9 +758,9 @@ public partial class CommandParser
 
             if (followerSneaking)
             {
-                foreach (var observer in _world.GetPlayersInRoom(follower.CurrentMapNumber, follower.CurrentRoomNumber, follower))
+                if (followerSneakBroke)
                 {
-                    if (ObserverNoticesSneaker(observer, follower))
+                    foreach (var observer in _world.GetPlayersInRoom(follower.CurrentMapNumber, follower.CurrentRoomNumber, follower))
                         _world.SendToPlayer(observer.Name, GetTextExitArrivalMessage(exit, follower.Name));
                 }
             }
@@ -779,6 +785,8 @@ public partial class CommandParser
                 if (followerSneaking)
                     await followerClient.SendLineAsync($"{MudAnsi.White}Sneaking...{MudAnsi.Reset}");
                 await followerClient.SendLineAsync($"{MudAnsi.White} -- Following your Party leader {followLabel} --{MudAnsi.Reset}");
+                if (followerHeardOwnSneakBreak)
+                    await followerClient.SendLineAsync(SneakBreakSoundLine);
                 var followerParser = new CommandParser(followerClient, _world, follower);
                 // The trap message (leader-style BrightRed) precedes the room, and a lethal trap routes
                 // through the follower's own death handler instead of showing the destination room.
@@ -1400,15 +1408,19 @@ public partial class CommandParser
             string arriveDir = GetOppositeDirection(direction);
             var departingMonsterAttackers = SnapshotDepartingMonsterAttackers(follower, currentRoom.MapNumber, currentRoom.RoomNumber);
 
-            // Each follower sneaks individually: a SNEAKing follower keeps that state through the
-            // party move. Moving only breaks HIDE, never SNEAK (mirrors the solo move path).
+            // Each follower sneaks individually. Stock moves a sneaking follower through the same sneak
+            // path as a solo sneaker, so the follower re-rolls stealth on the follow move: a held roll keeps
+            // the sneak and is announced to no one; a failed roll ends it and every player in both rooms is
+            // told (mirrors the solo move path).
             bool followerSneaking = follower.IsSneaking;
+            bool followerSneakBroke = followerSneaking &&
+                new CommandParser(followerClient, _world, follower).RollSneakMoveBreak(currentRoom);
+            bool followerHeardOwnSneakBreak = followerSneakBroke && MoverHearsOwnSneakBreak(follower);
             if (followerSneaking)
             {
-                // Per-observer sneaking departure: only watchers who beat the stealth roll see it.
-                foreach (var observer in _world.GetPlayersInRoom(currentRoom.MapNumber, currentRoom.RoomNumber, follower))
+                if (followerSneakBroke)
                 {
-                    if (ObserverNoticesSneaker(observer, follower))
+                    foreach (var observer in _world.GetPlayersInRoom(currentRoom.MapNumber, currentRoom.RoomNumber, follower))
                         _world.SendToPlayer(observer.Name, GetSneakDepartureMessage(follower.Name, departDir));
                 }
             }
@@ -1426,7 +1438,7 @@ public partial class CommandParser
             follower.IsHidden = false;
             // The "moved this tick" bit: a sneaking move keeps the follower unseen by monsters
             // until the next upkeep clears it (the could-attack gate A).
-            follower.SneakedInThisTick = followerSneaking;
+            follower.SneakedInThisTick = follower.IsSneaking;
 
             ResolvePostTravelCombatState(follower, currentRoom, followerExit, departingMonsterAttackers);
             _world.NotifyPlayerEnteredRoom(follower);
@@ -1442,9 +1454,9 @@ public partial class CommandParser
 
             if (followerSneaking)
             {
-                foreach (var observer in _world.GetPlayersInRoom(follower.CurrentMapNumber, follower.CurrentRoomNumber, follower))
+                if (followerSneakBroke)
                 {
-                    if (ObserverNoticesSneaker(observer, follower))
+                    foreach (var observer in _world.GetPlayersInRoom(follower.CurrentMapNumber, follower.CurrentRoomNumber, follower))
                         _world.SendToPlayer(observer.Name, GetSneakArrivalMessage(follower.Name, arriveDir));
                 }
             }
@@ -1468,6 +1480,9 @@ public partial class CommandParser
                 if (followerSneaking)
                     await followerClient.SendLineAsync($"{MudAnsi.White}Sneaking...{MudAnsi.Reset}");
                 await followerClient.SendLineAsync($"{MudAnsi.White} -- Following your Party leader {direction} --{MudAnsi.Reset}");
+                // Stock prints a follower's own "You make a sound" warning after the follow line.
+                if (followerHeardOwnSneakBreak)
+                    await followerClient.SendLineAsync(SneakBreakSoundLine);
                 var followerParser = new CommandParser(followerClient, _world, follower);
                 // The trap message precedes the room; a lethal trap routes through the follower's own
                 // death handler instead of showing the destination room.
@@ -1564,8 +1579,20 @@ public partial class CommandParser
     // pre-roll snapshot (the snapshot stays set for the remainder of the move).
     private async Task ResolveSneakMoveBreakAsync(Room currentRoom)
     {
-        if (_player.HasPerfectStealth)
+        if (!RollSneakMoveBreak(currentRoom))
             return;
+
+        // The roll failed and the sneak flag is already clear; now warn a perceptive mover.
+        if (MoverHearsOwnSneakBreak(_player))
+            await _client.SendLineAsync(SneakBreakSoundLine);
+    }
+
+    // The per-move stealth roll on its own, so a party follow can roll it for each follower and print the
+    // warning later in the follower's own output. Returns true when the sneak BROKE (flag already cleared).
+    private bool RollSneakMoveBreak(Room currentRoom)
+    {
+        if (_player.HasPerfectStealth)
+            return false;
 
         int chance = Player.CalculateStealthChance(
             _player.Stealth,
@@ -1576,30 +1603,17 @@ public partial class CommandParser
 
         // Roll 0..100 (top exclusive): sneak holds when roll < chance; a roll >= chance breaks it.
         if (Random.Shared.Next(0, 101) < chance)
-            return;
+            return false;
 
         // Roll failed — sneak ends now (the flag clears before the warning prints).
         _player.IsSneaking = false;
-
-        // genrdn(0,100) < Perception: the more perceptive mover notices their own noise.
-        if (Random.Shared.Next(0, 100) < _player.Perception)
-            await _client.SendLineAsync($"{MudAnsi.Red}You make a sound as you enter the room!{MudAnsi.Reset}");
+        return true;
     }
 
-    // ── Per-observer sneak visibility, faithful to stock ─────────────────────
-    // Monster ability 57 = See Hidden → boolean detect.
-    // An observer with See Hidden always sees a sneaker.
-    // Movement display: per-observer perception vs stealth.
-    // Stock uses a perception threshold of 40 for detection display checks.
+    // genrdn(0,100) < Perception: the more perceptive mover notices their own noise.
+    private static bool MoverHearsOwnSneakBreak(Player mover) => Random.Shared.Next(0, 100) < mover.Perception;
 
-    private static bool ObserverNoticesSneaker(Player observer, Player sneaker)
-    {
-        if (observer.HasSeeHidden) return true;
-        // Observer's perception must meaningfully exceed sneaker's stealth.
-        // Low perception (~18) vs decent stealth (~25) should almost never detect.
-        int chance = Math.Clamp(observer.Perception - sneaker.Stealth, 5, 75);
-        return Random.Shared.Next(100) < chance;
-    }
+    private static string SneakBreakSoundLine => $"{MudAnsi.Red}You make a sound as you enter the room!{MudAnsi.Reset}";
 
     // Stock: "You notice %s sneaking out upwards%s." / "downwards%s." / "to the %s%s."
     private static string GetSneakDepartureMessage(string playerName, string direction) => direction switch
