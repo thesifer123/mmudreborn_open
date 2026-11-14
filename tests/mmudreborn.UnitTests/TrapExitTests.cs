@@ -104,15 +104,17 @@ public sealed class TrapExitTests
         Assert.Equal(string.Empty, message);
     }
 
+    // A walk fires a type-9 trap only while it is armed (IsTrapCurrentlyDisarmed is the walk's check).
     [Fact]
-    public void MaybeTriggerTrapOnTraverse_returns_null_after_disarm()
+    public void Trap_is_disarmed_after_a_successful_disarm_so_a_walk_does_not_fire_it()
     {
         var world = CreateWorldWithTrap(damage: 36, traps: 100, disarmTraps: 100);
         var (player, room) = (world.Player, world.Room);
         var exit = room.GetExit("northwest")!;
 
+        Assert.False(world.World.IsTrapCurrentlyDisarmed(exit));
         Assert.True(world.World.TryDisarmExit(player, room, "northwest", out _, out _));
-        Assert.Null(world.World.MaybeTriggerTrapOnTraverse(player, exit));
+        Assert.True(world.World.IsTrapCurrentlyDisarmed(exit));
     }
 
     // Spell-trap (type 24, e.g. the blow-dart traps in map 15): DISARM handles it

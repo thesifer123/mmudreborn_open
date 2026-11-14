@@ -591,23 +591,9 @@ public partial class GameWorld
         return false;
     }
 
-    public string? MaybeTriggerTrapOnTraverse(Player player, RoomExitDefinition exit)
-    {
-        if (!exit.IsTrapExit)
-            return null;
-
-        var state = GetExitState(exit);
-        RefreshTrapReArm(state, DateTime.UtcNow);
-        if (state.TrapDisarmed)
-            return null;
-
-        int damage = ApplyTrapDamage(player, exit);
-        return damage > 0 ? $"You spring a trap and take {damage} damage!" : null;
-    }
-
     // True when the (spell-)trap on this exit is currently disarmed (re-arm timer refreshed first).
-    // The spell-trap (type 24) traverse path queries this to skip casting; type-9 traps gate inside
-    // MaybeTriggerTrapOnTraverse.
+    // The spell-trap (type 24) traverse path queries this to skip casting; a walk into a type-9 trap
+    // checks it to decide whether the trap fires.
     public bool IsTrapCurrentlyDisarmed(RoomExitDefinition exit)
     {
         if (!exit.IsDisarmableTrapExit)
@@ -618,9 +604,9 @@ public partial class GameWorld
         return state.TrapDisarmed;
     }
 
-    // A player dropped through a sprung trapdoor takes the trap's damage like any trap exit, armed state
-    // aside (stock fires it unconditionally). Returns the damage dealt.
-    public int ApplyTrapdoorDamage(Player player, RoomExitDefinition trapdoor) => ApplyTrapDamage(player, trapdoor);
+    // The damage a trap exit deals a player when it fires (an armed trap walked into, or a sprung trapdoor).
+    // The caller has already decided it fires. Returns the damage dealt.
+    public int ApplyTrapExitDamage(Player player, RoomExitDefinition trap) => ApplyTrapDamage(player, trap);
 
     private int ApplyTrapDamage(Player player, RoomExitDefinition exit)
     {

@@ -190,16 +190,26 @@ public partial class CommandParser
         if (!string.IsNullOrWhiteSpace(successMessage))
             await _client.SendLineAsync(successMessage);
 
-        // Exit type 9: an armed trap on this exit fires as the player passes through it.
-        var trapMessage = _world.MaybeTriggerTrapOnTraverse(_player, destination);
-        if (trapMessage != null)
+        // Exit type 9: an armed trap fires as you walk into it, and in stock the trap makes the move itself
+        // (SpringTrapExitAsync) — none of the ordinary walk below happens. Your party, a body you drag and
+        // your pets still come along.
+        if (destination.IsTrapExit && !_world.IsTrapCurrentlyDisarmed(destination))
         {
-            await _client.SendLineAsync($"{MudAnsi.BrightRed}{trapMessage}{MudAnsi.Reset}");
-            if (_player.CurrentHP <= Player.DeathHP)
+            if (_world.GetRoom(destination.TargetMap, destination.TargetRoom) == null)
             {
-                await HandlePlayerDeath();
+                await _client.SendLineAsync("That path leads nowhere...");
                 return;
             }
+
+            if (!await SpringTrapExitAsync(currentRoom, destination))
+                return;
+
+            await HandleIndependentPartyTravelCleanupAsync(_player, disbandLeader: false);
+            await MoveFollowingPartyMembersAsync(currentRoom, direction);
+            await MoveDraggedPlayerAsync(currentRoom, direction, draggedPlayer);
+            _world.MovePlayerPetsToFollow(_player, currentRoom.MapNumber, currentRoom.RoomNumber);
+            await CheckEncounters();
+            return;
         }
 
         if (destination.ExitType == RoomExitType.Cast)
@@ -766,13 +776,6 @@ public partial class CommandParser
             ResolvePostTravelCombatState(follower, currentRoom, exit, departingMonsterAttackers);
             _world.NotifyPlayerEnteredRoom(follower);
 
-            // Exit type 9: the exit's trap fires for EVERY party member that traverses it, each
-            // rolling its own damage — not just the leader. The follower exemption (skip the
-            // special handler) is present ONLY on case-1 door exits; the trap case (9) has no such guard,
-            // so a following member springs the same armed trap independently. Mirror the leader path.
-            string? followerTrapMessage = _world.MaybeTriggerTrapOnTraverse(follower, exit);
-            bool followerDiedToTrap = followerTrapMessage != null && follower.CurrentHP <= Player.DeathHP;
-
             follower.SuppressBroadcastReprompt = true;
 
             if (followerSneaking)
@@ -807,14 +810,7 @@ public partial class CommandParser
                 if (followerHeardOwnSneakBreak)
                     await followerClient.SendLineAsync(SneakBreakSoundLine);
                 var followerParser = new CommandParser(followerClient, _world, follower);
-                // The trap message (leader-style BrightRed) precedes the room, and a lethal trap routes
-                // through the follower's own death handler instead of showing the destination room.
-                if (followerTrapMessage != null)
-                    await followerClient.SendLineAsync($"{MudAnsi.BrightRed}{followerTrapMessage}{MudAnsi.Reset}");
-                if (followerDiedToTrap)
-                    await followerParser.HandlePlayerDeath();
-                else
-                    await followerParser.ShowRoom(brief: follower.BriefMode || follower.FollowModeBlind);
+                await followerParser.ShowRoom(brief: follower.BriefMode || follower.FollowModeBlind);
             }
             finally
             {
@@ -824,11 +820,6 @@ public partial class CommandParser
                 await followerClient.SendAsync(MudAnsi.Prompt(follower));
 
             follower.SuppressBroadcastReprompt = false;
-
-            // A follower the trap killed can no longer follow — drop them from the party (their death
-            // handler has already relocated them to the death room).
-            if (followerDiedToTrap)
-                DropFollowerFromLeaderParty(follower, null);
         }
     }
 
@@ -840,10 +831,13 @@ public partial class CommandParser
             .ToList();
     }
 
-    private void ResolvePostTravelCombatState(Player player, Room fromRoom, RoomExitDefinition exit, IReadOnlyList<MonsterInstance> departingMonsterAttackers)
+    private void ResolvePostTravelCombatState(Player player, Room fromRoom, RoomExitDefinition exit, IReadOnlyList<MonsterInstance> departingMonsterAttackers,
+        bool monstersFollow = true)
     {
         // Everything locked onto the player rolls to follow, whether or not it was swinging this round.
-        var followedAttackers = _world.ResolveMonsterPursuit(player, fromRoom, exit);
+        // A trap's move (monstersFollow: false) skips this, as stock's does; a monster locked on the player
+        // still chases on its own update.
+        var followedAttackers = monstersFollow ? _world.ResolveMonsterPursuit(player, fromRoom, exit) : [];
         if (departingMonsterAttackers.Count > 0 || followedAttackers.Count > 0)
         {
             player.ReplaceIncomingMonsterAttackers(followedAttackers);
@@ -1425,6 +1419,15 @@ public partial class CommandParser
             if (followerClient == null)
                 continue;
 
+            // Exit type 9: an armed trap fires for EVERY party member that walks through it, each rolling its
+            // own damage, and the trap makes each follower's move itself (SpringTrapExitAsync): no entry
+            // gate, no departing swing, no walk lines and no "-- Following your Party leader --" line.
+            if (followerExit.IsTrapExit && !_world.IsTrapCurrentlyDisarmed(followerExit))
+            {
+                await MoveFollowerThroughArmedTrapAsync(follower, followerClient, currentRoom, followerExit, followerSneaking);
+                continue;
+            }
+
             // The entry gate keyed on the FOLLOWER's own state: a follower in combat /
             // retaliating is barred from a protected room (and the gate sends its own message) → dropped.
             if (!await IsRoomEntryAllowedForAsync(follower, followerClient, followerDestinationRoom, currentRoom.RoomType))
@@ -1474,12 +1477,6 @@ public partial class CommandParser
             ResolvePostTravelCombatState(follower, currentRoom, followerExit, departingMonsterAttackers);
             _world.NotifyPlayerEnteredRoom(follower);
 
-            // Exit type 9: the exit's trap fires for EVERY party member that traverses it, each
-            // rolling its own damage — not just the leader (the follower exemption exists only on case-1
-            // door exits, never on the trap case). Spring it on this follower via their own resolved exit.
-            string? followerTrapMessage = _world.MaybeTriggerTrapOnTraverse(follower, followerExit);
-            bool followerDiedToTrap = followerTrapMessage != null && follower.CurrentHP <= Player.DeathHP;
-
             // Suppress broadcast reprompts for the follower while being moved
             follower.SuppressBroadcastReprompt = true;
 
@@ -1515,14 +1512,7 @@ public partial class CommandParser
                 if (followerHeardOwnSneakBreak)
                     await followerClient.SendLineAsync(SneakBreakSoundLine);
                 var followerParser = new CommandParser(followerClient, _world, follower);
-                // The trap message precedes the room; a lethal trap routes through the follower's own
-                // death handler instead of showing the destination room.
-                if (followerTrapMessage != null)
-                    await followerClient.SendLineAsync($"{MudAnsi.BrightRed}{followerTrapMessage}{MudAnsi.Reset}");
-                if (followerDiedToTrap)
-                    await followerParser.HandlePlayerDeath();
-                else
-                    await followerParser.ShowRoom(brief: follower.BriefMode || follower.FollowModeBlind);
+                await followerParser.ShowRoom(brief: follower.BriefMode || follower.FollowModeBlind);
             }
             finally
             {
@@ -1531,13 +1521,40 @@ public partial class CommandParser
             if (!followerHolding)
                 await followerClient.SendAsync(MudAnsi.Prompt(follower));
 
-            // A follower the trap killed can no longer follow — drop them (their death handler already
-            // relocated them to the death room).
-            if (followerDiedToTrap)
-                DropFollowerFromLeaderParty(follower, null);
-
             follower.SuppressBroadcastReprompt = false;
         }
+    }
+
+    // A follower walking into an armed trap behind its leader. The follow is async output driven by the
+    // leader's move, so it is held while the follower is typing, as on any party follow. "Sneaking..." still
+    // shows for a sneaking follower (stock prints it at the start of the follower's move). A follower the trap
+    // kills can no longer follow: drop them (their death handler already moved them to the death room).
+    private async Task MoveFollowerThroughArmedTrapAsync(Player follower, IGameClient followerClient, Room fromRoom,
+        RoomExitDefinition trap, bool followerSneaking)
+    {
+        follower.SuppressBroadcastReprompt = true;
+        bool followerHolding = followerClient.HasPendingInput;
+        if (!followerHolding)
+            await followerClient.ClearCurrentLineAsync();
+        followerClient.BeginHeldOutput();
+        bool survived;
+        try
+        {
+            if (followerSneaking)
+                await followerClient.SendLineAsync($"{MudAnsi.White}Sneaking...{MudAnsi.Reset}");
+            survived = await new CommandParser(followerClient, _world, follower).SpringTrapExitAsync(fromRoom, trap);
+        }
+        finally
+        {
+            followerClient.EndHeldOutput();
+        }
+        if (!followerHolding)
+            await followerClient.SendAsync(MudAnsi.Prompt(follower));
+
+        if (!survived)
+            DropFollowerFromLeaderParty(follower, null);
+
+        follower.SuppressBroadcastReprompt = false;
     }
 
     private async Task MoveDraggedPlayerAsync(Room currentRoom, string direction, Player? draggedPlayer)
@@ -1657,11 +1674,8 @@ public partial class CommandParser
     }
 
     // One player falling through a sprung trapdoor. Stock's mover refuses a held or stunned player and one
-    // too heavy to move; anyone else takes the trap's damage ([Para1/2, Para1]) and its message (Para3):
-    // Line1 to the faller (green, %d = the damage), Line2 to the room left and Line3 to the room below
-    // (bright yellow, the name in green). There are no ordinary walk lines and no departing swing. Hide,
-    // rest and meditation end; a sneak does not. pushedOutput: the faller didn't type the command, so their
-    // lines are pushed to them the way a party follow's are.
+    // too heavy to move; anyone else goes through the trap (SpringTrapExitAsync). pushedOutput: the faller
+    // didn't type the command, so their lines are pushed to them the way a party follow's are.
     private async Task FallThroughTrapdoorAsync(Room fromRoom, RoomExitDefinition trapdoor, bool pushedOutput)
     {
         bool holding = pushedOutput && _client.HasPendingInput;
@@ -1687,37 +1701,8 @@ public partial class CommandParser
                 return;
             }
 
-            _world.Database.Messages.TryGetValue(trapdoor.Para3, out var message);
-            int damage = _world.ApplyTrapdoorDamage(_player, trapdoor);
-
-            if (!string.IsNullOrWhiteSpace(message?.Line2))
-                _world.BroadcastToRoom(fromRoom.MapNumber, fromRoom.RoomNumber, FormatTrapRoomLine(message.Line2), _client);
-
-            var departingMonsterAttackers = SnapshotDepartingMonsterAttackers(_player, fromRoom.MapNumber, fromRoom.RoomNumber);
-            _player.IsHidden = false;
-            _player.IsResting = false;
-            _player.IsMeditating = false;
-            _player.CurrentMapNumber = trapdoor.TargetMap;
-            _player.CurrentRoomNumber = trapdoor.TargetRoom;
-            _player.RecordMove(trapdoor.TargetMap, trapdoor.TargetRoom);
-            ResolvePostTravelCombatState(_player, fromRoom, trapdoor, departingMonsterAttackers);
-            _world.NotifyPlayerEnteredRoom(_player);
-
-            if (!string.IsNullOrWhiteSpace(message?.Line3))
-                _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, FormatTrapRoomLine(message.Line3), _client);
-
-            if (!string.IsNullOrWhiteSpace(message?.Line1))
-                await _client.SendLineAsync($"{MudAnsi.LinePreamble}{MudAnsi.Green}{message.Line1.Replace("%d", damage.ToString(), StringComparison.Ordinal)}{MudAnsi.Reset}");
-
-            if (_player.CurrentHP <= Player.DeathHP)
-            {
-                await HandlePlayerDeath();
-            }
-            else
-            {
-                await ShowRoom(brief: _player.BriefMode);
+            if (await SpringTrapExitAsync(fromRoom, trapdoor))
                 await CheckEncounters();
-            }
         }
         finally
         {
@@ -1729,6 +1714,52 @@ public partial class CommandParser
                 _player.SuppressBroadcastReprompt = false;
             }
         }
+    }
+
+    // Stock's trap-exit firing, shared by an armed trap you walk into (yourself or following your leader)
+    // and a trapdoor you fall through. In stock this IS the move, made by the trap itself:
+    //   - the trap's damage, a roll over [Para1/2, Para1];
+    //   - its message (Para3): Line2 to the room left, then Line3 to the room entered (bright yellow, the
+    //     name in green), then Line1 to the mover (green, %d = the damage), then the room.
+    // None of the ordinary walk happens: no walk lines (sneaking or not), no departing swing, no noise next
+    // door, no room-permission check, and no monster follows straight away (one locked on the mover still
+    // chases on its own update). Hide, rest and meditation end; a sneak does not. An invisible sysop is
+    // still not announced. Returns false when the trap killed the mover (death handled, no room shown).
+    private async Task<bool> SpringTrapExitAsync(Room fromRoom, RoomExitDefinition trap)
+    {
+        _world.Database.Messages.TryGetValue(trap.Para3, out var message);
+        int damage = _world.ApplyTrapExitDamage(_player, trap);
+        bool announce = !_player.IsSysopInvisible;
+
+        if (announce && !string.IsNullOrWhiteSpace(message?.Line2))
+            _world.BroadcastToRoom(fromRoom.MapNumber, fromRoom.RoomNumber, FormatTrapRoomLine(message.Line2), _client);
+
+        var departingMonsterAttackers = SnapshotDepartingMonsterAttackers(_player, fromRoom.MapNumber, fromRoom.RoomNumber);
+        _player.IsHidden = false;
+        _player.IsResting = false;
+        _player.IsMeditating = false;
+        _player.CurrentMapNumber = trap.TargetMap;
+        _player.CurrentRoomNumber = trap.TargetRoom;
+        _player.RecordMove(trap.TargetMap, trap.TargetRoom);
+        // The trap's move sets the "moved this tick" bit too (the could-attack gate A), as a walk does.
+        _player.SneakedInThisTick = _player.IsSneaking;
+        ResolvePostTravelCombatState(_player, fromRoom, trap, departingMonsterAttackers, monstersFollow: false);
+        _world.NotifyPlayerEnteredRoom(_player);
+
+        if (announce && !string.IsNullOrWhiteSpace(message?.Line3))
+            _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber, FormatTrapRoomLine(message.Line3), _client);
+
+        if (!string.IsNullOrWhiteSpace(message?.Line1))
+            await _client.SendLineAsync($"{MudAnsi.LinePreamble}{MudAnsi.Green}{message.Line1.Replace("%d", damage.ToString(), StringComparison.Ordinal)}{MudAnsi.Reset}");
+
+        if (_player.CurrentHP <= Player.DeathHP)
+        {
+            await HandlePlayerDeath();
+            return false;
+        }
+
+        await ShowRoom(brief: _player.BriefMode);
+        return true;
     }
 
     private string FormatTrapRoomLine(string line)
