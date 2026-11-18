@@ -1591,6 +1591,11 @@ public partial class CommandParser
                 return;
             }
 
+            // Readying a weapon breaks autocombat BEFORE the old weapon's "removes" line (armour breaks
+            // after its swap-out lines, below).
+            if (item.IsWieldedWeapon)
+                await BreakAutocombatForGearChangeAsync();
+
             long oldInstanceId = GetEquipmentInstanceId(slot, oldItemId);
             _player.Equipment.Remove(slot);
             _player.EquipmentInstanceIds.Remove(slot);
@@ -1616,6 +1621,10 @@ public partial class CommandParser
             _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber,
                 removeRoomLine, _client);
         }
+
+        // The equip goes through: autocombat ends here, before the "wears"/"wields" lines (a no-op for a
+        // weapon that already broke it above).
+        await BreakAutocombatForGearChangeAsync();
 
         TryRemoveInventoryItemAt(inventoryIndex, out _, out _);
         _player.Equipment[slot] = itemId;
@@ -1838,6 +1847,14 @@ public partial class CommandParser
             return;
         }
 
+        // Removing the READIED weapon is stock's unready (the same one a bare DISARM runs): "You now have
+        // no weapon readied.", the room "%s removes %s.", and the autocombat break — not the armour lines.
+        if (removeSlot == "weapon")
+        {
+            await UnreadyReadiedWeaponAsync();
+            return;
+        }
+
         long removeInstanceId = GetEquipmentInstanceId(removeSlot, removeItemId);
         _player.Equipment.Remove(removeSlot);
         _player.EquipmentInstanceIds.Remove(removeSlot);
@@ -1856,6 +1873,7 @@ public partial class CommandParser
             : $"{MudAnsi.Yellow}{_player.Name} removes {removedItem.Name}!{MudAnsi.Reset}";
         _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber,
             removeMsg, _client);
+        await BreakAutocombatForGearChangeAsync();
 
         RecalcEquipment();
     }

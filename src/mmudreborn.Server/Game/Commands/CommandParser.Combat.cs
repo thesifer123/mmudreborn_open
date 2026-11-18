@@ -965,6 +965,21 @@ public partial class CommandParser
         await _client.SendLineAsync(GameAnsi.CombatOff("*Combat Off*"));
     }
 
+    // Changing gear — readying or unreadying a weapon, wearing or removing armour — ends autocombat with
+    // stock's ROOM-announcing break: "*Combat Off*" to you and "%s breaks off combat." to everyone else in
+    // the room (both in the combat-toggle yellow), only when you were inside autocombat. Stock does this
+    // on every successful wear, remove, ready and unready; a refused one (can't use it, cursed, the
+    // two-hander/off-hand rule) returns before it and leaves the fight running.
+    private async Task BreakAutocombatForGearChangeAsync()
+    {
+        if (!_player.InCombat)
+            return;
+        _player.StopCombatLoop();
+        await _client.SendLineAsync(GameAnsi.CombatOff("*Combat Off*"));
+        _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber,
+            GameAnsi.CombatOff($"{_player.Name} breaks off combat."), _client);
+    }
+
     private async Task HandleBackstab(string target)
     {
         if (await IsTooAfraidToAttackAsync())
@@ -2046,6 +2061,7 @@ public partial class CommandParser
         await _client.SendLineAsync($"{MudAnsi.Yellow}You now have no weapon readied.{MudAnsi.Reset}");
         _world.BroadcastToRoom(_player.CurrentMapNumber, _player.CurrentRoomNumber,
             $"{MudAnsi.Yellow}{_player.Name} removes {weapon.Name}.{MudAnsi.Reset}", _client);
+        await BreakAutocombatForGearChangeAsync();
 
         RecalcEquipment();
     }
