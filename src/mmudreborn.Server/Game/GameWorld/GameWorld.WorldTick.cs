@@ -2106,10 +2106,10 @@ public partial class GameWorld
         }
     }
 
-    // A monster that dies from poison upkeep (no direct
-    // killer in the combat loop) still drops its carried treasure to the room, announces its death, and
-    // is removed/regen-scheduled. No XP is awarded — the upkeep tick has no killer to credit. Reuses the
-    // same death-reward roll as a combat kill so loot is identical.
+    // A monster that dies off the combat loop — a DoT or poison tick, an exit trap — has no killer, but
+    // it still drops its carried treasure to the room, announces its death, pays the kill experience to
+    // everyone still fighting it (AwardKillerlessMonsterExperience), and is removed/regen-scheduled.
+    // Reuses the same death-reward roll as a combat kill so loot and experience are identical.
     private void KillMonsterFromUpkeep(MonsterInstance monster)
     {
         if (!TryBeginMonsterDeathProcessing(monster))
@@ -2140,7 +2140,77 @@ public partial class GameWorld
         if (!string.IsNullOrEmpty(death.DeathMessage))
             BroadcastToRoom(map, room, death.DeathMessage, reprompt: true);
 
+        AwardKillerlessMonsterExperience(monster, death.ExpGained);
+
         RemoveDeadMonster(monster);
+    }
+
+    // Experience for a monster that died with no killer — a weapon-proc bleed or a cast DoT ticking it
+    // out, poison, an exit trap. Stock reaps such a monster in its medium update and shares the kill out
+    // just like a combat kill, only with no killer: the players still INSIDE AUTOCOMBAT who either hold
+    // this monster as their target, or hold no target at all while standing in its room (the area
+    // channeller). Those are CommandParser.GetMonsterExperienceRecipients' two groups minus the killer.
+    // Players locked onto the monster end their fight with "*Combat Off*"; the channeller keeps going.
+    // We used to pay nothing here, so a bleed-out kill gave no experience at all.
+    //
+    // Deliberate deviation from stock: its split seeds the divisor with 1 for the killer (the killer's
+    // own row is skipped while counting the rest). With no killer that seat is never filled, so stock
+    // divides by N+1 — a solo player got half the kill for a bleed-out, two players a third each. That
+    // is an obvious bug, so the share here is N ways, exactly like a combat kill.
+    private void AwardKillerlessMonsterExperience(MonsterInstance monster, long baseExperience)
+    {
+        var roomPlayers = GetPlayersInRoom(monster.MapNumber, monster.RoomNumber);
+
+        var recipients = new List<Player>();
+        foreach (var player in roomPlayers)
+        {
+            if (!player.InCombat)
+                continue;
+
+            bool lockedOntoThisMonster = ReferenceEquals(player.CombatTarget, monster);
+            bool fightsTheWholeRoom = player.CombatTarget == null && player.PlayerCombatTarget == null;
+            if (lockedOntoThisMonster || fightsTheWholeRoom)
+                recipients.Add(player);
+        }
+
+        // Snapshot who was locked on before RemoveIncomingMonsterAttacker below nulls their CombatTarget.
+        var lockedOntoMonster = recipients
+            .Where(player => ReferenceEquals(player.CombatTarget, monster))
+            .ToHashSet();
+
+        foreach (var roomPlayer in roomPlayers)
+            roomPlayer.RemoveIncomingMonsterAttacker(monster);
+
+        if (recipients.Count == 0)
+            return;
+
+        long totalExperienceAward = ScaleMonsterExperienceAward(baseExperience);
+        long experienceShare = totalExperienceAward <= 0
+            ? 0
+            : (totalExperienceAward + recipients.Count - 1) / recipients.Count;
+
+        foreach (var player in recipients)
+        {
+            bool endsThisPlayersFight = lockedOntoMonster.Contains(player);
+            if (endsThisPlayersFight)
+                player.StopCombatLoop();
+
+            // Same level-ahead gate as a combat kill: the fight still ends, only the award is withheld.
+            if (experienceShare > 0 && IsBlockedByLevelAheadCap(player))
+            {
+                SendToPlayer(player.Name, GameAnsi.Experience(
+                    "You have progressed too far without training to acquire anymore experience!", player.PaletteId));
+            }
+            else
+            {
+                player.Experience += experienceShare;
+                CommandParser.AddGangExperience(player, experienceShare);
+                SendToPlayer(player.Name, GameAnsi.Experience($"You gain {experienceShare} experience.", player.PaletteId));
+            }
+
+            if (endsThisPlayersFight)
+                SendToPlayer(player.Name, GameAnsi.CombatOff("*Combat Off*"));
+        }
     }
 
     // `killer` names what to record in the non-stock death log. These deaths have no attacker to blame —

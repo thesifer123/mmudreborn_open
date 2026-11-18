@@ -3434,7 +3434,7 @@ public partial class CommandParser
         AddGangExperience(_player, gained);
     }
 
-    private static void AddGangExperience(Player player, long gained)
+    internal static void AddGangExperience(Player player, long gained)
     {
         if (gained <= 0)
             return;

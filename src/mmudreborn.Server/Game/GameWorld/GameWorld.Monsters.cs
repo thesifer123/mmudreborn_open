@@ -1671,9 +1671,9 @@ public partial class GameWorld
             return;
         }
 
-        // A trap kill has no killer to credit, exactly like the poison-upkeep death: loot drops, the
-        // death line goes to the room, no XP. Deferred to the next medium tick so the monster's own
-        // movement lines land first, which is also when stock reaps it (the medium pass's
+        // A trap kill has no killer, exactly like the poison-upkeep death: loot drops, the death line goes
+        // to the room, and anyone still fighting it shares the exp. Deferred to the next medium tick so the
+        // monster's own movement lines land first, which is also when stock reaps it (the medium pass's
         // leading dead-monster check).
         if (monster.IsDead)
             _pendingExitTrapKills.Enqueue(monster);
