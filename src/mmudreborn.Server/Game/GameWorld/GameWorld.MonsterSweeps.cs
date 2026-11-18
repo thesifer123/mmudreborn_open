@@ -102,8 +102,8 @@ public partial class GameWorld
             RefreshMonsterBufferSlots();
             for (long call = 0; call < pollCalls; call++)
                 RunPollCall(playersInGame);
-            ResolveSweepKills();
         }
+        ResolveSweepKills();
         AnnounceSweepMovements();
     }
 
@@ -360,14 +360,21 @@ public partial class GameWorld
     private bool IsMonsterInWorld(MonsterInstance monster)
         => _roomMonsters.TryGetValue((monster.MapNumber, monster.RoomNumber), out var list) && list.Contains(monster);
 
-    // Kills from spell upkeep or poison found during a batch of steps. Caller holds _monsterLock.
+    // Kills from spell upkeep, poison or an exit trap found during a batch of steps. Called AFTER the
+    // caller releases _monsterLock: a killerless death casts the monster's DeathSpell through a player
+    // session, which is async — resumed on another thread while this one held the lock, it would deadlock.
     private void ResolveSweepKills()
     {
-        if (_sweepKills.Count == 0)
-            return;
+        List<MonsterInstance> kills;
+        lock (_monsterLock)
+        {
+            if (_sweepKills.Count == 0)
+                return;
 
-        var kills = _sweepKills.ToList();
-        _sweepKills.Clear();
+            kills = _sweepKills.ToList();
+            _sweepKills.Clear();
+        }
+
         foreach (var monster in kills)
             KillMonsterFromUpkeep(monster);
     }
@@ -408,8 +415,8 @@ public partial class GameWorld
             RefreshMonsterBufferSlots();
             for (long call = 0; call < (long)passes * playersInGame; call++)
                 RunPollCall(playersInGame);
-            ResolveSweepKills();
         }
+        ResolveSweepKills();
         AnnounceSweepMovements();
     }
 
@@ -419,8 +426,8 @@ public partial class GameWorld
         lock (_monsterLock)
         {
             KickMonsterSweep(MonsterSweepKind.Medium, completeSweep: false);
-            ResolveSweepKills();
         }
+        ResolveSweepKills();
         AnnounceSweepMovements();
     }
 

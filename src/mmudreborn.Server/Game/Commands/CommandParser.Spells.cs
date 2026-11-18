@@ -2383,7 +2383,9 @@ public partial class CommandParser
     // self/ally types (1/2/4) and the area types (3/5/6/7/9-13)
     // actually fire. Summons (ability 12) spawn reinforcements; area offensive/debuff spells hit the
     // room; chain-cast (ability 151) recasts a follow-up. This is the DeathSpell path, run from the killer's
-    // session, so the in-room player it affects is _player. (CreateSpell's world-clean subset — summon +
+    // session, so the in-room player it affects is _player. (A monster that dies with no killer — a bleed,
+    // poison, an exit trap — runs it from a fighter's session; GameWorld.CastKillerlessMonsterDeathSpell.)
+    // (CreateSpell's world-clean subset — summon +
     // self-buff — fires at the spawn site in GameWorld, which has no player session.)
     private const int MonsterTriggeredCastLevel = 1;          // stock passes 1 as the area/level param
     private const int MaxMonsterTriggeredChainDepth = 3;      // guard against summon/chain cascades
@@ -2494,7 +2496,9 @@ public partial class CommandParser
     // advanced players no-op), so a redundant re-run (e.g. the registry backstop) is idempotent.
     private async Task RunTriggeredTextBlockForRecipientsAsync(int textBlockId, IReadOnlyList<Player>? recipients)
     {
-        if (recipients == null || recipients.Count == 0)
+        // An EMPTY list (as opposed to none) is a killerless death that nobody was fighting: the area temp
+        // landed on no one, so no one runs the block — not even the session the cast was rendered through.
+        if (recipients == null)
         {
             await TryExecuteTextBlockAsync(textBlockId, triggerInput: null, clueKeywords: null);
             return;

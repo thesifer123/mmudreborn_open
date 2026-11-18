@@ -1759,10 +1759,16 @@ public partial class GameWorld : IBbsDoorContext
     private const int ScriptedCommandTextBlockAbility = 148;   // run a textblock as a script
 
     private void FireMonsterCreateSpell(MonsterInstance caster, int depth)
+        => FireMonsterSpellWithoutSession(caster, caster.Template.CreateSpell, depth);
+
+    // The world-clean subset of a monster's CreateSpell/DeathSpell, for when there is no player session to
+    // cast it through — a spawn, or a killerless death with nobody in the room (see
+    // CastKillerlessMonsterDeathSpell).
+    private void FireMonsterSpellWithoutSession(MonsterInstance caster, int spellId, int depth)
     {
-        if (caster.Template.CreateSpell <= 0
+        if (spellId <= 0
             || depth >= MaxCreateSpellDepth
-            || !Database.Spells.TryGetValue(caster.Template.CreateSpell, out var spell))
+            || !Database.Spells.TryGetValue(spellId, out var spell))
         {
             return;
         }

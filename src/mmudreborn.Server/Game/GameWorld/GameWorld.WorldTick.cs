@@ -314,8 +314,8 @@ public partial class GameWorld
         lock (_monsterLock)
         {
             KickMonsterSweep(MonsterSweepKind.Fast, completeMonsterSweep);
-            ResolveSweepKills();
         }
+        ResolveSweepKills();
         AnnounceSweepMovements();
     }
 
@@ -472,11 +472,11 @@ public partial class GameWorld
         lock (_monsterLock)
         {
             KickMonsterSweep(MonsterSweepKind.Slow, completeMonsterSweep);
-            ResolveSweepKills();
             AdjustPollRateFromSaveWrites();
             if (_slowTickCount % SaveBufferSlowTicks == 0)
                 KickSaveSweep();
         }
+        ResolveSweepKills();
         AnnounceSweepMovements();
 
         // Replenish finite shop stock on the slow tick.
@@ -676,12 +676,11 @@ public partial class GameWorld
             // The medium tick resets the realm-wide 3-attempt wander budget and re-arms/steps the
             // medium monster sweep: active-spell upkeep and ambient wander happen when the sweep reaches
             // each monster's buffer slot, at a pace set by the players in the game
-            // (GameWorld.MonsterSweeps). Monsters the previous tick's exit traps killed are reaped
-            // here, before this tick moves anything — matching the monster update, which opens with a
-            // dead-monster reap.
+            // (GameWorld.MonsterSweeps). Monsters the previous tick's exit traps killed are queued for
+            // the reap ahead of this tick's sweep kills — matching the monster update, which opens with a
+            // dead-monster reap. Both are reaped once the lock is released (ResolveSweepKills, below).
             ReapExitTrapKilledMonsters();
             KickMonsterSweep(MonsterSweepKind.Medium, completeMonsterSweep);
-            ResolveSweepKills();
             movementAnnouncements = TakeSweepMovementAnnouncements();
             if (profileTick)
                 movementMs = MarkPhase(ref phaseStart);
@@ -699,6 +698,9 @@ public partial class GameWorld
             phaseStart = Stopwatch.GetTimestamp();
         }
 
+        // Reap the upkeep/trap kills outside the lock (see ResolveSweepKills), before the movement lines,
+        // as when they were reaped inside it.
+        ResolveSweepKills();
         AnnounceMonsterMovements(movementAnnouncements);
         if (profileTick)
             movementAnnounceMs = MarkPhase(ref phaseStart);
@@ -2107,9 +2109,11 @@ public partial class GameWorld
     }
 
     // A monster that dies off the combat loop — a DoT or poison tick, an exit trap — has no killer, but
-    // it still drops its carried treasure to the room, announces its death, pays the kill experience to
-    // everyone still fighting it (AwardKillerlessMonsterExperience), and is removed/regen-scheduled.
-    // Reuses the same death-reward roll as a combat kill so loot and experience are identical.
+    // it still drops its carried treasure to the room, casts its DeathSpell
+    // (CastKillerlessMonsterDeathSpell), announces its death, pays the kill experience to everyone still
+    // fighting it (AwardKillerlessMonsterExperience), and is removed/regen-scheduled. Reuses the same
+    // death-reward roll as a combat kill so loot and experience are identical. Runs OUTSIDE _monsterLock
+    // (see ResolveSweepKills): the DeathSpell is cast through a player session, which is async.
     private void KillMonsterFromUpkeep(MonsterInstance monster)
     {
         if (!TryBeginMonsterDeathProcessing(monster))
@@ -2125,6 +2129,11 @@ public partial class GameWorld
             DropCurrencyInRoom(map, room, death.RunicDropped, death.PlatinumDropped,
                 death.GoldDropped, death.SilverDropped, death.CopperDropped);
         }
+
+        // Stock's kill routine casts the DeathSpell right after the currency, before the death line —
+        // the same place a combat kill casts it (CommandParser.HandleMonsterDeath).
+        if (monster.Template.DeathSpell > 0)
+            CastKillerlessMonsterDeathSpell(monster, GetKillerlessMonsterExperienceRecipients(monster));
 
         // The monster kill hands every carried item to the room-DISPOSAL path, not a plain
         // room add — so a boss's hoard spills into adjacent rooms when the floor beneath it is
@@ -2160,18 +2169,9 @@ public partial class GameWorld
     private void AwardKillerlessMonsterExperience(MonsterInstance monster, long baseExperience)
     {
         var roomPlayers = GetPlayersInRoom(monster.MapNumber, monster.RoomNumber);
-
-        var recipients = new List<Player>();
-        foreach (var player in roomPlayers)
-        {
-            if (!player.InCombat)
-                continue;
-
-            bool lockedOntoThisMonster = ReferenceEquals(player.CombatTarget, monster);
-            bool fightsTheWholeRoom = player.CombatTarget == null && player.PlayerCombatTarget == null;
-            if (lockedOntoThisMonster || fightsTheWholeRoom)
-                recipients.Add(player);
-        }
+        // Judged now, after the DeathSpell — stock shares the exp only once its kill routine (and so the
+        // DeathSpell) is done, so a fighter its death-throes killed is no longer in autocombat to share.
+        var recipients = GetKillerlessMonsterExperienceRecipients(monster);
 
         // Snapshot who was locked on before RemoveIncomingMonsterAttacker below nulls their CombatTarget.
         var lockedOntoMonster = recipients
@@ -2211,6 +2211,52 @@ public partial class GameWorld
             if (endsThisPlayersFight)
                 SendToPlayer(player.Name, GameAnsi.CombatOff("*Combat Off*"));
         }
+    }
+
+    // The players fighting a monster that died with no killer: in its room, inside autocombat, and either
+    // holding it as their target or holding no target at all (the area channeller).
+    private List<Player> GetKillerlessMonsterExperienceRecipients(MonsterInstance monster)
+    {
+        var recipients = new List<Player>();
+        foreach (var player in GetPlayersInRoom(monster.MapNumber, monster.RoomNumber))
+        {
+            if (!player.InCombat)
+                continue;
+
+            bool lockedOntoThisMonster = ReferenceEquals(player.CombatTarget, monster);
+            bool fightsTheWholeRoom = player.CombatTarget == null && player.PlayerCombatTarget == null;
+            if (lockedOntoThisMonster || fightsTheWholeRoom)
+                recipients.Add(player);
+        }
+        return recipients;
+    }
+
+    // The DeathSpell of a monster that died with no killer. Stock's kill routine casts it on EVERY monster
+    // death, killer or not: it never passes the killer, only (DeathSpell, level 1, the monster, no player
+    // target) — the same call a spawn makes for the CreateSpell. So a quest boss that bleeds out, dies of
+    // poison or falls to an exit trap still delivers its quest chain, still explodes, still summons.
+    //
+    // Our caster (CommandParser.CastMonsterTriggeredSpellAsync) renders through a player session, the way a
+    // combat kill's runs through the killer's. With no killer it runs through one of the monster's
+    // fighters (else anyone in the room), and the quest textblock reaches exactly the fighters — the area
+    // temp that carries it lands on the players in combat with the monster, so a bystander gets nothing.
+    // With nobody in the room only the world-side part can matter (summons, self-buffs), and that fires the
+    // way a CreateSpell does.
+    private void CastKillerlessMonsterDeathSpell(MonsterInstance monster, IReadOnlyList<Player> fighters)
+    {
+        int deathSpellId = monster.Template.DeathSpell;
+        var host = fighters
+            .Concat(GetPlayersInRoom(monster.MapNumber, monster.RoomNumber))
+            .FirstOrDefault(player => GetClientForPlayer(player.Name) != null);
+        if (host == null)
+        {
+            FireMonsterSpellWithoutSession(monster, deathSpellId, depth: 0);
+            return;
+        }
+
+        new CommandParser(GetClientForPlayer(host.Name)!, this, host)
+            .CastMonsterTriggeredSpellAsync(monster, deathSpellId, areaTextBlockRecipients: fighters)
+            .GetAwaiter().GetResult();
     }
 
     // `killer` names what to record in the non-stock death log. These deaths have no attacker to blame —

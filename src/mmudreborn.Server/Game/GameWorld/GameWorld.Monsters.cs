@@ -1681,10 +1681,12 @@ public partial class GameWorld
 
     private readonly System.Collections.Concurrent.ConcurrentQueue<MonsterInstance> _pendingExitTrapKills = new();
 
+    // Hand the previous tick's trap kills to the sweep-kill list (caller holds _monsterLock), ahead of this
+    // tick's sweep kills; ResolveSweepKills reaps them all once the lock is released.
     private void ReapExitTrapKilledMonsters()
     {
         while (_pendingExitTrapKills.TryDequeue(out var monster))
-            KillMonsterFromUpkeep(monster);
+            _sweepKills.Add(monster);
     }
 
     private bool IsMonsterAllowedInRoom(Monster template, Room room)
