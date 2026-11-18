@@ -29,11 +29,16 @@ public partial class GameWorld
 
     private readonly object _shopStockLock = new();
 
-    // Finite shop stock is in-memory and re-seeded to full at boot (GameDatabase seeds Current=Max). To
-    // survive a restart we persist the DEPLETED slots (Current < Max) to a JSON blob in ServerSettings —
-    // the same pattern as the monster-regen ledger — and re-apply them after boot. Set on every purchase
-    // / restock change; the slow-tick + shutdown persist paths write only when set.
-    private const string ShopStockStateSettingKey = "ShopStockState";
+    // Finite shop stock is in-memory and re-seeded at boot to each slot's stock starting quantity
+    // (GameDatabase seeds Current=Initial). To survive a restart we persist the slots that DEVIATE from
+    // it (Current != Initial) to a JSON blob in ServerSettings — the same pattern as the monster-regen
+    // ledger — and re-apply them after boot. Set on every purchase / sale / restock change; the slow-tick +
+    // shutdown persist paths write only when set.
+    //
+    // V2: the original "ShopStockState" blob recorded depletion against a FULL shop (every slot used to
+    // boot at Max). Its numbers mean nothing against stock's starting quantities, so it is left unread
+    // and shops start fresh at their stock quantities.
+    private const string ShopStockStateSettingKey = "ShopStockStateV2";
     private volatile bool _shopStockDirty;
 
     private sealed class PersistedShopSlot
@@ -72,6 +77,31 @@ public partial class GameWorld
     }
 
     /// <summary>
+    /// A sale puts the item on the shop's shelf: every slot listing it that is below its Max gains one.
+    /// Stock does this on every real sale (an APPRAISE changes nothing), except at the deed shop, whose
+    /// deeds come back only at the nightly cleanup. A sell-only slot (Max 0) never takes stock, so a
+    /// junkyard stays sell-only. This is how an item a shop starts without (stock ships 122 slots at zero
+    /// with no restock) ever becomes buyable.
+    /// </summary>
+    public void AddShopStockFromSale(Shop shop, int itemId)
+    {
+        if (shop.ShopType == DeedShopType)
+            return;
+
+        lock (_shopStockLock)
+        {
+            foreach (var slot in shop.Items)
+            {
+                if (slot.ItemId == itemId && slot.Current < slot.Max)
+                {
+                    slot.Current++;
+                    _shopStockDirty = true;
+                }
+            }
+        }
+    }
+
+    /// <summary>
     /// The restock (slow tick): for every finite slot whose per-slot restock
     /// timer is due, roll <c>genrdn(1,100) &lt; Percent</c> and, on success, add <c>Amount</c> (clamped
     /// to Max) while the slot is below Max. Gang shops never restock; <c>Time</c> is the restock
@@ -104,7 +134,7 @@ public partial class GameWorld
     }
 
     /// <summary>
-    /// Re-seed every shop slot back to a full-boot state (Current = Max, restock timers cleared). The
+    /// Re-seed every shop slot back to its boot state (Current = Initial, restock timers cleared). The
     /// live server only does this at startup (LoadShops), but the integration harness reuses one
     /// GameWorld across many tests, so the test reset path calls this to keep finite stock isolated.
     /// </summary>
@@ -116,7 +146,7 @@ public partial class GameWorld
             {
                 foreach (var item in shop.Items)
                 {
-                    item.Current = item.Max;
+                    item.Current = item.Initial;
                     item.NextRestockUtc = default;
                 }
             }
@@ -136,8 +166,9 @@ public partial class GameWorld
     }
 
     /// <summary>
-    /// Persist the depleted finite shop slots (Current &lt; Max) so purchases survive a restart. Only
-    /// deviations are recorded, so the blob stays tiny. Gang/deed shops are managed elsewhere and skipped.
+    /// Persist the finite shop slots that deviate from their boot quantity (Current != Initial) so
+    /// purchases and sales survive a restart. Only deviations are recorded, so the blob stays small.
+    /// Gang/deed shops are managed elsewhere and skipped.
     /// Builds the snapshot under the stock lock, then writes outside it (no DB I/O under the lock).
     /// </summary>
     public void PersistShopStock()
@@ -154,8 +185,8 @@ public partial class GameWorld
                 for (int i = 0; i < shop.Items.Count; i++)
                 {
                     var item = shop.Items[i];
-                    // Only depleted finite slots deviate from the full-boot state worth restoring.
-                    if (item.ItemId <= 0 || item.Max <= 0 || item.Current >= item.Max)
+                    // Only finite slots that moved off their boot quantity are worth restoring.
+                    if (item.ItemId <= 0 || item.Max <= 0 || item.Current == item.Initial)
                         continue;
 
                     entries.Add(new PersistedShopSlot
@@ -175,9 +206,9 @@ public partial class GameWorld
     }
 
     /// <summary>
-    /// Re-apply persisted shop-stock depletion after boot (shops seed Current=Max on load). Matches by
+    /// Re-apply persisted shop stock after boot (shops seed Current=Initial on load). Matches by
     /// (shop, slot) and verifies the slot still holds the same item, so a shop edited between runs simply
-    /// keeps its full-boot stock for the changed slots rather than mis-applying a saved quantity.
+    /// keeps its boot stock for the changed slots rather than mis-applying a saved quantity.
     /// </summary>
     public void LoadPersistedShopStock()
     {
@@ -192,7 +223,7 @@ public partial class GameWorld
         }
         catch (JsonException)
         {
-            return; // corrupt blob: leave shops at their full-boot state
+            return; // corrupt blob: leave shops at their boot state
         }
 
         lock (_shopStockLock)

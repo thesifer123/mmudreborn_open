@@ -41,6 +41,7 @@ public sealed partial class PostgresBootstrapper
         EnsureSpellsDurRandImported(conn);
         EnsureMonsterGroupFormationImported(conn);
         EnsureShopsExtrasImported(conn);
+        EnsureShopsItemNowImported(conn);
         EnsureRoomMaxAreaImported(conn);
         EnsureRoomByNumberImported(conn);
     }
@@ -752,6 +753,71 @@ public sealed partial class PostgresBootstrapper
 
         var rows = LoadTsvSeed("shops_extras.tsv");
         SeedFromTsv(conn, "Shops", "Number", rows, new[] { "Description" });
+    }
+
+    // Each shop slot's starting quantity. Stock's shop record carries a live "now" count beside each
+    // slot's max, and stock sells only what is on the shelf: a buy vends a slot only while its count is
+    // non-zero, a sale adds one back (up to max), and the restock tops it up on the slot's own timer. The
+    // pristine stock data ships 411 of its 1013 sellable slots below max, 122 of them at zero with no
+    // restock at all — items stock never sells until a player sells one to that shop. The converter read
+    // the count and dropped it, so every slot booted full. The DAT importer (tools/dat-import) writes
+    // these columns straight from your shop data; an optional shops_item_now.csv seed resource
+    // (Shop,Slot,Item,Now) backfills a database imported before that. A NULL cell means "never seeded"
+    // and boots full. Idempotent: only NULL cells whose slot still holds the seed's item are filled, so a
+    // sysop's later edit survives a restart.
+    private static void EnsureShopsItemNowImported(NpgsqlConnection conn)
+    {
+        for (int slot = 0; slot < 20; slot++)
+            AddColumnIfMissing(conn, "Shops", $"ItemNow-{slot}", "BIGINT");
+
+        foreach (var slotRows in LoadShopItemNowCsvSeed("shops_item_now.csv").GroupBy(row => row.Slot))
+        {
+            var sql = new System.Text.StringBuilder();
+            sql.Append($"UPDATE {GameDataSchema}.\"Shops\" AS t SET \"ItemNow-{slotRows.Key}\" = s.now FROM (VALUES ");
+            bool first = true;
+            foreach (var row in slotRows)
+            {
+                if (!first) sql.Append(", ");
+                sql.Append($"({row.Shop}, {row.Item}, {row.Now})");
+                first = false;
+            }
+            sql.Append($") AS s(shop, item, now) WHERE t.\"Number\" = s.shop AND t.\"Item-{slotRows.Key}\" = s.item")
+               .Append($" AND t.\"ItemNow-{slotRows.Key}\" IS NULL");
+
+            using var update = new NpgsqlCommand(sql.ToString(), conn);
+            update.ExecuteNonQuery();
+        }
+    }
+
+    // Loads the `Shop,Slot,Item,Now` CSV seed resource. Rows with malformed numbers or a slot outside
+    // 0..19 are skipped (matches the other loaders).
+    private static List<(int Shop, int Slot, int Item, int Now)> LoadShopItemNowCsvSeed(string resourceFileName)
+    {
+        var assembly = typeof(PostgresBootstrapper).Assembly;
+        string resourceName = $"mmudreborn.Server.Data.SeedResources.{resourceFileName}";
+        using var stream = assembly.GetManifestResourceStream(resourceName);
+        if (stream == null)
+            return [];
+
+        var rows = new List<(int, int, int, int)>();
+        using var reader = new System.IO.StreamReader(stream);
+        reader.ReadLine(); // header
+        string? line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            var parts = line.Split(',');
+            if (parts.Length < 4
+                || !int.TryParse(parts[0], out int shop)
+                || !int.TryParse(parts[1], out int slot)
+                || !int.TryParse(parts[2], out int item)
+                || !int.TryParse(parts[3], out int now)
+                || slot < 0 || slot >= 20)
+            {
+                continue;
+            }
+            rows.Add((shop, slot, item, now));
+        }
+        return rows;
     }
 
     private static void AddColumnIfMissing(NpgsqlConnection conn, string table, string column, string columnDef)

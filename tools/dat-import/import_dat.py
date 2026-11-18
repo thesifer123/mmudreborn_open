@@ -567,7 +567,7 @@ def parse_shop(rec):
     c.skip(1)
     items = c.i32s(20)
     max_qty = c.i16s(20)
-    c.skip(40)                    # current quantity (runtime state)
+    now_qty = c.i16s(20)          # current quantity: what each slot starts with (often below max, or 0)
     rgn_time = c.i16s(20)
     rgn_amount = c.i16s(20)
     rgn_percent = c.u8s(20)
@@ -575,7 +575,7 @@ def parse_shop(rec):
         return None
     row = {"Number": number, "Name": name, "ShopType": shop_type, "MinLvl": min_lvl,
            "MaxLvl": max_lvl, "MarkupPercent": markup, "ClassRest": class_rest}
-    for col, values in (("Item", items), ("ItemMax", max_qty), ("ItemTime", rgn_time),
+    for col, values in (("Item", items), ("ItemMax", max_qty), ("ItemNow", now_qty), ("ItemTime", rgn_time),
                         ("ItemAmt", rgn_amount), ("ItemPer", rgn_percent)):
         for i in range(20):
             row["%s-%d" % (col, i)] = values[i]
@@ -1019,7 +1019,7 @@ TABLES = {
              [(c, INT0) for c in ("Attributes", "RoomType", "MaxArea", "ByNumber")],
     "Shops": [("Number", "bigint"), ("Name", "text")] +
              [(c, "bigint") for c in ("ShopType", "MinLvl", "MaxLvl", "MarkupPercent", "ClassRest")] +
-             _series("Item", 20) + _series("ItemMax", 20) + _series("ItemTime", 20) +
+             _series("Item", 20) + _series("ItemMax", 20) + _series("ItemNow", 20) + _series("ItemTime", 20) +
              _series("ItemAmt", 20) + _series("ItemPer", 20) + [("Description", TEXT0)],
     "Spells": [("Number", "bigint"), ("Name", "text"), ("Short", "text")] +
               [(c, "bigint") for c in ("ReqLevel", "EnergyCost", "ManaCost", "MinBase", "MaxBase", "Diff",

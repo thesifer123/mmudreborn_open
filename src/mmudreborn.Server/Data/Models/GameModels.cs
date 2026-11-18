@@ -946,10 +946,14 @@ public class ShopItem
     public int Amount { get; set; }    // restock qty added per tick.
     public int Percent { get; set; }   // restock probability % per tick (a roll of 1..99 < Percent).
 
-    // --- Runtime stock state (NOT in the static game data; seeded to Max at load, decremented by buy
-    // on buy, replenished on restock). Boots full, but DEPLETED slots are
-    // persisted to ServerSettings (GameWorld.PersistShopStock) and re-applied after boot, so purchases
-    // survive a restart instead of the stock silently refilling. ---
+    // The quantity the slot boots with: stock's per-slot "now" count from the shop data (ItemNow-N),
+    // clamped to [0, Max]; Max when the data carries none. Stock ships many slots below max, and some
+    // at zero with no restock (never for sale until a player sells one there).
+    public int Initial { get; set; }
+
+    // --- Runtime stock state: seeded to Initial at load, decremented on buy, incremented on sell (up
+    // to Max), replenished on restock. Slots that deviate from Initial are persisted to ServerSettings
+    // (GameWorld.PersistShopStock) and re-applied after boot, so purchases and sales survive a restart. ---
     public int Current { get; set; }
     public DateTime NextRestockUtc { get; set; }
 }

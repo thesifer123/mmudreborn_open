@@ -529,6 +529,9 @@ public partial class CommandParser
             TryRemoveResolvedCarriedItem(saleMatch, out _);
             _world.RemoveItemRuntimeState(saleMatch.InstanceId);
             CurrencyHelper.SetFromCopper(_player, CurrencyHelper.ToCopper(_player) + sellPriceCopper);
+            // The sold item goes on the shop's shelf (each listing slot below max gains one).
+            if (sellRoom != null && _world.Database.Shops.TryGetValue(sellRoom.Shop, out var stockShop))
+                _world.AddShopStockFromSale(stockShop, item.Number);
             RecalcEquipment();
             soldTotalCopper += sellPriceCopper;
             soldName = item.Name;

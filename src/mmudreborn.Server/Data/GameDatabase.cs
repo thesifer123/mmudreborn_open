@@ -1058,6 +1058,9 @@ public class GameDatabase : IGameDatabase
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT * FROM game_data.\"Shops\"";
         using var reader = cmd.ExecuteReader();
+        // Per-slot boot quantity, added by PostgresBootstrapper.EnsureShopsItemNowImported; absent or NULL
+        // means the slot boots full.
+        var nowOrdinals = Enumerable.Range(0, 20).Select(i => TryGetOrdinal(reader, $"ItemNow-{i}")).ToArray();
         while (reader.Read())
         {
             var shop = new Shop
@@ -1077,6 +1080,10 @@ public class GameDatabase : IGameDatabase
                 if (itemId > 0)
                 {
                     int max = reader.GetInt32(reader.GetOrdinal($"ItemMax-{i}"));
+                    int? nowOrdinal = nowOrdinals[i];
+                    int initial = max > 0 && nowOrdinal.HasValue && !reader.IsDBNull(nowOrdinal.Value)
+                        ? Math.Clamp(reader.GetInt32(nowOrdinal.Value), 0, max)
+                        : max;
                     shop.Items.Add(new ShopItem
                     {
                         ItemId = itemId,
@@ -1084,7 +1091,8 @@ public class GameDatabase : IGameDatabase
                         Time = reader.GetInt32(reader.GetOrdinal($"ItemTime-{i}")),
                         Amount = reader.GetInt32(reader.GetOrdinal($"ItemAmt-{i}")),
                         Percent = reader.GetInt32(reader.GetOrdinal($"ItemPer-{i}")),
-                        Current = max,   // shops boot full (no current-qty in static data)
+                        Initial = initial,
+                        Current = initial,
                     });
                 }
             }
